@@ -97,6 +97,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             {"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.jpg", "file_id": file_id}
         ]:
             try:
+                # stream=Trueを使用してヘッダーのみチェック
                 if requests.get(attempt["url"], headers=headers, stream=True, timeout=10).status_code == 200:
                     valid_media_list.append(attempt)
                     break
@@ -141,6 +142,7 @@ for target in url_list:
         if last_id is not None and post_id <= last_id: continue
         if post_id in sent_post_ids: continue
         
+        # 初回実行時はIDの更新のみ行う
         if last_id is None:
             new_last_id = max(new_last_id or 0, post_id)
             continue
