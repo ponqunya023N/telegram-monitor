@@ -89,45 +89,42 @@ def extract_urls(text: str):
 # ===== Telegram送信ロジック =====
 def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     """
-    メディアをグループ（アルバム）として送信する。
-    1枚目のメディアにテキスト詳細とダブルボタンをキャプションとして付与する。
+    メディアをグループとして送信し、直後にボタン付きメッセージを送る。
     """
-    print(f"      [DEBUG] Telegramへ送信を試みます... (Media: {len(media_urls)})")
+    print(f"      [DEBUG] Telegramへ送信を試みます... (Media候補: {len(media_urls)})")
     
-    # 1. メディアの準備
     final_media_list = []
-    processed_count = 0
     
     for m_url in media_urls:
-        if processed_count >= 10: break
+        if len(final_media_list) >= 10: break
         
         parsed = urlparse(m_url)
         file_id = parsed.path.rstrip("/").split("/")[-1]
         d_char = parsed.netloc.split('.')[0]
         base_netloc = parsed.netloc if d_char.startswith("cdn") else f"cdn{d_char}.5chan.jp"
 
-        # 拡張子判別とURL組み立て
-        ext = m_url.split('.')[-1].lower()
-        if ext in ["mp4", "mov", "webm"]:
+        # 拡張子判別をシンプルに修正 (元のURLを優先的に反映)
+        is_video = any(x in m_url.lower() for x in [".mp4", ".mov", ".webm", "video"])
+        
+        if is_video:
             media_type = "video"
-            target_download_url = f"https://{base_netloc}/file/{file_id}.mp4"
+            target_download_url = f"https://{base_netloc}/file/{file_id}"
+            if not target_download_url.endswith(".mp4"): target_download_url += ".mp4"
         else:
             media_type = "photo"
-            target_download_url = f"https://{base_netloc}/file/plane/{file_id}.jpg"
+            target_download_url = f"https://{base_netloc}/file/plane/{file_id}"
+            if not target_download_url.endswith(".jpg"): target_download_url += ".jpg"
 
-        # デバッグ: 組み立てたURLを表示
         print(f"      [DEBUG] 試行URL: {target_download_url}")
 
         try:
             r = requests.head(target_download_url, headers=headers, timeout=10)
             if r.status_code == 200:
                 final_media_list.append({"type": media_type, "media": target_download_url})
-                processed_count += 1
             else:
-                print(f"      [DEBUG] 404/不可アクセス: {target_download_url} (Status: {r.status_code})")
+                print(f"      [DEBUG] 存在確認失敗: {r.status_code}")
         except Exception as e:
-            print(f"      [DEBUG] HEADリクエストエラー: {e}")
-            continue
+            print(f"      [DEBUG] HEADエラー: {e}")
 
     # テキストとボタンの準備
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
@@ -138,7 +135,6 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
         f"{summary_text}"
     )
     
-    # ダブルボタン（横並び）
     keyboard = {
         "inline_keyboard": [[
             {"text": "掲示板-直リンク", "url": board_url},
@@ -146,43 +142,28 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
         ]]
     }
 
-    # 2. 送信処理
+    # 送信
     if not final_media_list:
-        print(f"      [DEBUG] 有効なメディアが見つかりませんでした。テキストのみ送信します。")
-        send_msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message_text,
-            "parse_mode": "HTML",
-            "reply_markup": json.dumps(keyboard)
-        }
-        resp = requests.post(send_msg_url, data=payload)
+        print(f"      [DEBUG] 有効なメディアがありません。テキストのみ送信。")
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message_text, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)}
+        requests.post(url, data=payload)
     else:
-        # アルバム送信 (sendMediaGroup)
-        # 1枚目にキャプションとパースモード、ボタン（ただしGroupはボタン非対応のため別途送るか検討）を付与
-        # ※sendMediaGroupはボタンをサポートしていないため、アルバム+テキストメッセージの2通に分けます。
-        
-        send_group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
-        # 1枚目にのみキャプションを付ける
+        # メディアグループの送信
+        group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
+        # 最初の1枚にのみキャプションを付ける
         final_media_list[0]["caption"] = message_text
         final_media_list[0]["parse_mode"] = "HTML"
         
-        resp_group = requests.post(send_group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(final_media_list)})
-        print(f"      [DEBUG] sendMediaGroup response: {resp_group.status_code}")
+        resp_g = requests.post(group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(final_media_list)})
+        print(f"      [DEBUG] sendMediaGroup status: {resp_g.status_code} {resp_g.text}")
         
-        # アルバムにはボタンが付かないため、ボタン付きのメッセージを別途送信
-        send_msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"⤴️ #{post_id} のリンクはこちら",
-            "reply_markup": json.dumps(keyboard)
-        }
-        resp = requests.post(send_msg_url, data=payload)
+        # ボタン送信 (MediaGroupはボタン非対応のため)
+        msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🔗 #{post_id} 直リンク", "reply_markup": json.dumps(keyboard)}
+        requests.post(msg_url, data=payload)
 
-    if resp.status_code == 200:
-        print(f"      [SUCCESS] 投稿#{post_id} の送信完了。")
-    else:
-        print(f"      [ERROR] Telegram送信失敗: {resp.text}")
+    print(f"      [SUCCESS] 投稿#{post_id} 処理完了。")
 
 # ===== メイン処理 =====
 for target in url_list:
@@ -240,7 +221,6 @@ for target in url_list:
                 abs_url = urljoin(target, a_tag.get("href"))
                 media_urls.append(abs_url)
 
-        # URLの準備
         base_target = target.split('?')[0].rstrip('/')
         target_post_url = f"{base_target}/{post_id}"
         board_url = base_target + "/"
@@ -250,5 +230,3 @@ for target in url_list:
             board_url, target_post_url, list(dict.fromkeys(media_urls))
         )
         sent_post_ids.add(post_id)
-
-    # 検証中は既読更新をスキップ
