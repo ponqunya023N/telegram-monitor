@@ -15,6 +15,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # 最新の履歴を正しく取得するために fetch-depth: 0 を推奨
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,8 +44,10 @@ jobs:
           git config --local user.name "github-actions[bot]"
           if [ -n "$(git status --porcelain)" ]; then
             git add last_post_id_*.txt
+            # Push前に最新のリモートの変更を取り込んで競合を回避
+            git pull --rebase origin main
             git commit -m "Update last_post_id [skip ci]"
-            git push
+            git push origin main
           else
             echo "No changes to commit"
           fi
