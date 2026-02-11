@@ -3,6 +3,7 @@ import sys
 import re
 import time
 import json
+import io  # メモリ上でのデータ扱いに使用
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -146,22 +147,36 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             "parse_mode": "HTML",
             "reply_markup": json.dumps(keyboard)
         }
+        resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload)
     else:
-        # 【修正箇所】sendVideo/sendPhotoではなくsendDocumentを使用
-        # URLの末尾にダミーパラメータを付与してTelegramのパースを助ける
-        method = "sendDocument"
-        suffix = ".mp4" if valid_media["type"] == "video" else ".jpg"
-        media_url_with_hint = f"{valid_media['url']}?f={suffix}"
+        # 【修正箇所】メモリ経由でのデータ中継
+        # GitHub Actions側でデータを一度取得し、保存せずにTelegramへ投函する
+        method = "sendVideo" if valid_media["type"] == "video" else "sendPhoto"
+        media_field = "video" if valid_media["type"] == "video" else "photo"
+        
+        try:
+            # 5chanからデータをメモリに読み込む
+            media_resp = requests.get(valid_media["url"], headers=headers, timeout=20)
+            media_resp.raise_for_status()
+            
+            # ディスクには保存せず、BytesIO（メモリ上の仮想ファイル）として扱う
+            media_file = io.BytesIO(media_resp.content)
+            # ファイル名はTelegramが拡張子を判断するために付与
+            fname = "video.mp4" if valid_media["type"] == "video" else "image.jpg"
+            
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption_text,
+                "parse_mode": "HTML",
+                "reply_markup": json.dumps(keyboard)
+            }
+            files = {media_field: (fname, media_file)}
+            
+            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload, files=files)
+        except Exception as e:
+            print(f"      [ERROR] メモリ中継失敗: {e}")
+            return
 
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "document": media_url_with_hint,
-            "caption": caption_text,
-            "parse_mode": "HTML",
-            "reply_markup": json.dumps(keyboard)
-        }
-
-    resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload)
     if resp.status_code == 200:
         print(f"      [SUCCESS] 投稿#{post_id} 送信完了。")
     else:
