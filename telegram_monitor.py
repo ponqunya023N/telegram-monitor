@@ -20,10 +20,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
-# 【追加】Cloudflareからの強制トリガー用環境変数
-TRIGGER_LATEST_ID = os.environ.get("TRIGGER_LATEST_ID")
-TRIGGER_BOARD_ID = os.environ.get("TRIGGER_BOARD_ID")
-
 # 必須チェック
 missing = []
 if not TELEGRAM_BOT_TOKEN: missing.append("TELEGRAM_BOT_TOKEN")
@@ -74,7 +70,6 @@ def save_last_post_id(board_id: str, post_id: int):
     with open(fname, "w", encoding="utf-8") as f:
         f.write(str(post_id))
     
-    # 【追加箇所】GitHubリポジトリにIDファイルを永続保存して重複を完全に防ぐ
     if os.environ.get("GITHUB_ACTIONS") == "true":
         try:
             subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
@@ -92,36 +87,26 @@ def extract_urls(text: str):
     found = URL_PATTERN.findall(text)
     unique_urls = sorted(list(set(found)))
     filtered_urls = []
-    
-    # アンカーリンク（/掲示板ID/数字）を判定する正規表現を厳格化
     anchor_regex = re.compile(r'/[a-zA-Z0-9]+/\d+$')
 
     for url in unique_urls:
         if anchor_regex.search(url):
-            # disp や upup.be が含まれない、純粋なアンカーリンクは無視
             if "disp" not in url and "upup.be" not in url:
                 continue
-                
         if "disp" in url or "upup.be" in url:
             filtered_urls.append(url)
             continue
-            
         filtered_urls.append(url)
     return filtered_urls
 
 # ===== Telegram送信ロジック =====
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
-    """
-    メディアごとに本文とボタンを統合して送信する。
-    """
     print(f"      [LOG] 投稿#{post_id} のメディア解析開始 (候補数: {len(media_urls)})")
     valid_media_list = []
     
     for m_url in media_urls:
         parsed = urlparse(m_url)
         file_id = parsed.path.rstrip("/").split("/")[-1]
-        
-        # ドメインの動的判定
         netloc_parts = parsed.netloc.split('.')
         d_char = netloc_parts[0]
         
@@ -139,7 +124,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         found_for_this_url = False
         for attempt in attempts:
             try:
-                # stream=Trueでヘッダーのみを確認し、生存判定を行う
                 r = requests.get(attempt["url"], headers=headers, stream=True, timeout=10)
                 if r.status_code == 200:
                     valid_media_list.append(attempt)
@@ -201,7 +185,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
 # ===== メイン処理 =====
 for target in url_list:
     board_id = get_board_id(target)
-    
     try:
         resp = requests.get(target, headers=headers, timeout=15)
         resp.raise_for_status()
@@ -226,27 +209,15 @@ for target in url_list:
     last_post_id = load_last_post_id(board_id)
     newest_processed_id = last_post_id
 
-    # 【追加】Cloudflareから指定されたIDがあるか確認
-    forced_target_id = None
-    if TRIGGER_LATEST_ID and TRIGGER_BOARD_ID == board_id:
-        try:
-            forced_target_id = int(TRIGGER_LATEST_ID)
-            print(f" [INFO] Cloudflare指示によりID: {forced_target_id} を優先処理します。")
-        except: pass
-
     for article in reversed(articles):
         eno_tag = article.select_one("span.eno a")
         if eno_tag is None: continue 
         try:
             post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
-        except Exception:
-            continue
+        except Exception: continue
 
-        # 通常の重複チェック
         if last_post_id is not None and post_id <= last_post_id:
-            # ただし、Cloudflareから「これを送れ」と指定されたIDだけは、重複していても通す（デバッグ用）
-            if post_id != forced_target_id:
-                continue
+            continue
         
         if post_id in sent_post_ids:
             continue
