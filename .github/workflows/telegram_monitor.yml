@@ -5,6 +5,10 @@ on:
     types: [trigger_monitor, board_updated]
   workflow_dispatch:
 
+# ここで明示的にリポジトリへの書き込み権限を許可します
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,9 +33,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
-          # Cloudflareから送られてきたIDを環境変数としてPythonに渡す
-          TRIGGER_LATEST_ID: ${{ github.event.client_payload.latest_id }}
-          TRIGGER_BOARD_ID: ${{ github.event.client_payload.board_id }}
         run: python telegram_monitor.py
 
       - name: Commit and push if changed
