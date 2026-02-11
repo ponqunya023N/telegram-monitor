@@ -86,6 +86,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     """
     メディアごとに本文とボタンを統合して送信する。
     """
+    print(f"      [LOG] 投稿#{post_id} のメディア解析開始 (候補数: {len(media_urls)})")
     valid_media_list = []
     
     for m_url in media_urls:
@@ -100,13 +101,18 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.png", "file_id": file_id}
         ]
         
+        found_for_this_url = False
         for attempt in attempts:
             try:
                 r = requests.head(attempt["url"], headers=headers, timeout=10)
                 if r.status_code == 200:
                     valid_media_list.append(attempt)
+                    print(f"      [LOG] メディア特定成功: {attempt['type']} -> {attempt['url']}")
+                    found_for_this_url = True
                     break
             except: continue
+        if not found_for_this_url:
+            print(f"      [LOG] メディア特定失敗: {m_url}")
 
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
     caption_text = (
@@ -124,6 +130,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     }
 
     if not valid_media_list:
+        print(f"      [LOG] 有効メディアなし。テキストのみ送信します。")
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": caption_text,
@@ -141,6 +148,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         fname = f"{prefix}{media['file_id']}{suffix}"
 
         try:
+            print(f"      [LOG] Telegram送信中: {fname} ({method})")
             media_resp = requests.get(media["url"], headers=headers, timeout=20)
             media_resp.raise_for_status()
             media_file = io.BytesIO(media_resp.content)
@@ -153,9 +161,11 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             }
             files = {media_field: (fname, media_file)}
             
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload, files=files)
+            res = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload, files=files)
+            if res.status_code != 200:
+                print(f"      [ERROR] Telegram APIエラー: {res.status_code} {res.text}")
         except Exception as e:
-            print(f"      [ERROR] 送信失敗 ({fname}): {e}")
+            print(f"      [ERROR] 送信プロセス失敗 ({fname}): {e}")
 
 # ===== メイン処理 =====
 for target in url_list:
@@ -165,22 +175,21 @@ for target in url_list:
         resp = requests.get(target, headers=headers, timeout=15)
         resp.raise_for_status()
     except Exception as e:
-        print(f" [ERROR] 接続失敗 ({target}): {e}")
+        print(f" [ERROR] 掲示板接続失敗 ({target}): {e}")
         continue
 
     soup = BeautifulSoup(resp.text, "html.parser")
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
     
     articles = soup.select("article.resentry")
-    if not articles: continue
+    if not articles:
+        print(f" [LOG] 記事が見つかりません。")
+        continue
 
     last_post_id = load_last_post_id(board_id)
     newest_post_id = last_post_id if last_post_id else 0
-    
-    # 既読ファイルがない場合（初回実行）のフラグ
     is_initial_run = (last_post_id is None)
 
-    # 古い順に処理
     for article in reversed(articles):
         eno_tag = article.select_one("span.eno a")
         if eno_tag is None: continue 
@@ -188,21 +197,19 @@ for target in url_list:
             post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
         except: continue
 
-        # 最新IDを更新
         if post_id > newest_post_id:
             newest_post_id = post_id
 
-        # 既読チェック
         if last_post_id is not None and post_id <= last_post_id:
             continue
         if post_id in sent_post_ids:
             continue
             
-        # 初回実行時は、通知を送らずにループを継続（最新IDの取得のみ行う）
         if is_initial_run:
+            # 初回実行時はログのみ残してスキップ
             continue
 
-        print(f"  -> [NEW] 投稿#{post_id} を処理中...")
+        print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
         time_tag = article.select_one("time.date")
         posted_at = time_tag.get_text(strip=True) if time_tag else "N/A"
         comment_div = article.select_one("div.comment")
@@ -227,8 +234,11 @@ for target in url_list:
         )
         sent_post_ids.add(post_id)
 
-    # 最後に既読IDを保存（重要：git commitの対象になります）
     if newest_post_id > (last_post_id or 0):
         if is_initial_run:
-            print(f"  [INFO] 初回実行のため、最新ID #{newest_post_id} を記録して初期化完了。")
+            print(f" [LOG] 初回実行のため、最新ID #{newest_post_id} を記録して終了します（通知なし）。")
+        else:
+            print(f" [LOG] 既読IDを #{newest_post_id} に更新します。")
         save_last_post_id(board_id, newest_post_id)
+    else:
+        print(f" [LOG] 新着投稿はありませんでした。")
