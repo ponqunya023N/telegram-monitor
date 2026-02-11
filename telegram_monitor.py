@@ -87,81 +87,81 @@ def extract_urls(text: str):
     return filtered_urls
 
 # ===== Telegram送信ロジック =====
-def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
+def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     """
-    掲示板から抽出したIDに基づき、画像と動画の両方のURLを検証して送信する。
+    メディア(動画/画像)に本文とボタンを統合して1通で送信する。
     """
-    print(f"      [DEBUG] Telegramへ送信を試みます... (Media候補: {len(media_urls)})")
+    print(f"      [DEBUG] Telegramへ送信を試みます... (ID候補数: {len(media_urls)})")
     
-    final_media_list = []
+    valid_media = None
     
+    # GitHubに負荷をかけない外部URL検証（総当たり）
     for m_url in media_urls:
-        if len(final_media_list) >= 10: break
-        
         parsed = urlparse(m_url)
         file_id = parsed.path.rstrip("/").split("/")[-1]
         d_char = parsed.netloc.split('.')[0]
         base_netloc = parsed.netloc if d_char.startswith("cdn") else f"cdn{d_char}.5chan.jp"
 
-        # 総当たりで存在するURLを探す
+        # 優先順位：1.動画(planeなし) 2.画像(planeあり)
         attempts = [
             {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.mp4"},
             {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.jpg"},
-            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.png"},
-            {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.gif"}
+            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.png"}
         ]
         
-        found_valid_media = False
         for attempt in attempts:
             try:
                 r = requests.head(attempt["url"], headers=headers, timeout=10)
                 if r.status_code == 200:
-                    print(f"      [DEBUG] 有効なメディアを確認: {attempt['url']}")
-                    final_media_list.append({"type": attempt["type"], "media": attempt["url"]})
-                    found_valid_media = True
+                    valid_media = attempt
+                    print(f"      [DEBUG] 有効メディア特定: {valid_media['url']}")
                     break
-            except:
-                continue
-        
-        if not found_valid_media:
-            print(f"      [DEBUG] ID {file_id} に対応するメディアが見つかりませんでした。")
+            except: continue
+        if valid_media: break
 
     # テキストとボタンの準備
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
-    message_text = (
+    caption_text = (
         f"<b>【{board_name}】</b>\n"
         f"投稿番号: #{post_id}\n"
         f"投稿日時: {posted_at}\n\n"
         f"{summary_text}"
     )
     
+    # ボタン名：「掲示板」「投稿」
     keyboard = {
         "inline_keyboard": [[
-            {"text": "掲示板-直リンク", "url": board_url},
-            {"text": "投稿-直リンク", "url": target_post_url}
+            {"text": "掲示板", "url": board_url},
+            {"text": "投稿", "url": target_post_url}
         ]]
     }
 
-    # 送信
-    if not final_media_list:
-        print(f"      [DEBUG] 送信可能なメディアがないため、テキストのみ送信。")
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message_text, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)}
-        requests.post(url, data=payload)
+    # 1通にまとめて送信
+    if not valid_media:
+        print(f"      [DEBUG] 有効メディアなし。テキストのみ送信。")
+        method = "sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": caption_text,
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard)
+        }
     else:
-        group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
-        final_media_list[0]["caption"] = message_text
-        final_media_list[0]["parse_mode"] = "HTML"
-        
-        resp_g = requests.post(group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(final_media_list)})
-        print(f"      [DEBUG] sendMediaGroup status: {resp_g.status_code}")
-        
-        # アルバムの下にボタン付きリンクを別途送信
-        msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🔗 #{post_id} 直リンク", "reply_markup": json.dumps(keyboard)}
-        requests.post(msg_url, data=payload)
+        # メディアの種類に応じたメソッド
+        method = "sendVideo" if valid_media["type"] == "video" else "sendPhoto"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            valid_media["type"]: valid_media["url"],
+            "caption": caption_text,
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard)
+        }
 
-    print(f"      [SUCCESS] 投稿#{post_id} 処理完了。")
+    resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload)
+    if resp.status_code == 200:
+        print(f"      [SUCCESS] 投稿#{post_id} 送信完了。")
+    else:
+        print(f"      [ERROR] Telegram送信失敗: {resp.status_code} {resp.text}")
 
 # ===== メイン処理 =====
 for target in url_list:
@@ -223,7 +223,7 @@ for target in url_list:
         target_post_url = f"{base_target}/{post_id}"
         board_url = base_target + "/"
         
-        send_telegram_media_group(
+        send_telegram_combined(
             board_name, board_id, post_id, posted_at, body_text, 
             board_url, target_post_url, list(dict.fromkeys(media_urls))
         )
