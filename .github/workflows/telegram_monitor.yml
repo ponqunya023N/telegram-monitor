@@ -42,9 +42,15 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          
+          # 1. 変更を認識(add)させる前に、リモートの最新状態を取り込んでおく
+          git pull --rebase origin main
+          
+          # 2. その後、今回の実行で更新されたファイルをaddする
           git add last_post_id_*.txt
+          
+          # 3. 差分があればコミットしてプッシュ
           if [ -n "$(git status --porcelain)" ]; then
-            git pull --rebase origin main
             git commit -m "Update last_post_id [skip ci]"
             git push origin main
           else
