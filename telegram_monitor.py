@@ -18,16 +18,10 @@ LOG_WITH_TITLE = False
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
-GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
 # 必須チェック
-missing = []
-if not TELEGRAM_BOT_TOKEN: missing.append("TELEGRAM_BOT_TOKEN")
-if not TELEGRAM_CHAT_ID: missing.append("TELEGRAM_CHAT_ID")
-if not TARGET_URL: missing.append("TARGET_URL")
-
-if missing:
-    print(f"Missing environment variables: {', '.join(missing)}")
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
+    print("Missing environment variables.")
     sys.exit(1)
 
 # URLリスト化
@@ -70,12 +64,13 @@ def save_last_post_id(board_id: str, post_id: int):
     with open(fname, "w", encoding="utf-8") as f:
         f.write(str(post_id))
     
-    # GitHubリポジトリへの保存
+    # GitHub Actions環境なら変更をPush
     if os.environ.get("GITHUB_ACTIONS") == "true":
         try:
             subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
             subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
             subprocess.run(["git", "add", fname], check=True)
+            # 変更がある場合のみコミット
             status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
             if status.stdout.strip():
                 subprocess.run(["git", "commit", "-m", f"update last_id {board_id}"], check=True)
@@ -102,7 +97,7 @@ def extract_urls(text: str):
 
 # ===== Telegram送信ロジック =====
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
-    print(f"      [LOG] 投稿#{post_id} のメディア解析開始 (候補数: {len(media_urls)})")
+    print(f"      [LOG] 投稿#{post_id} のメディア解析開始")
     valid_media_list = []
     
     for m_url in media_urls:
@@ -128,17 +123,12 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
                 r = requests.get(attempt["url"], headers=headers, stream=True, timeout=10)
                 if r.status_code == 200:
                     valid_media_list.append(attempt)
-                    print(f"      [LOG] メディア特定成功: {attempt['type']} -> {attempt['url']}")
                     found_for_this_url = True
                     break
             except Exception:
                 continue
-        
-        if not found_for_this_url:
-            print(f"      [LOG] メディア特定失敗: {m_url}")
 
     if not valid_media_list:
-        print(f"      [LOG] 有効メディアなし。この投稿の通知をスキップします。")
         return
 
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
@@ -159,14 +149,9 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
         media_field = "video" if media["type"] == "video" else "photo"
-        prefix = "[mov]" if media["type"] == "video" else "[pic]"
-        suffix = ".mp4" if media["type"] == "video" else ".jpg"
-        fname = f"{prefix}{media['file_id']}{suffix}"
-
+        
         try:
-            print(f"      [LOG] Telegram送信中: {fname} ({method})")
             media_resp = requests.get(media["url"], headers=headers, timeout=20)
-            media_resp.raise_for_status()
             media_file = io.BytesIO(media_resp.content)
             
             payload = {
@@ -175,13 +160,10 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
                 "parse_mode": "HTML",
                 "reply_markup": json.dumps(keyboard)
             }
-            files = {media_field: (fname, media_file)}
-            
-            res = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload, files=files)
-            if res.status_code != 200:
-                print(f"      [ERROR] Telegram APIエラー: {res.status_code} {res.text}")
-        except Exception as e:
-            print(f"      [ERROR] 送信プロセス失敗 ({fname}): {e}")
+            files = {media_field: (f"file{media['file_id']}", media_file)}
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload, files=files)
+        except Exception:
+            pass
 
 # ===== メイン処理 =====
 for target in url_list:
@@ -189,28 +171,22 @@ for target in url_list:
     try:
         resp = requests.get(target, headers=headers, timeout=15)
         resp.raise_for_status()
-    except Exception as e:
-        print(f"--- Checking board: {board_id} ---")
-        print(f" [ERROR] 掲示板接続失敗 ({target}): {e}")
+    except Exception:
         continue
 
     soup = BeautifulSoup(resp.text, "html.parser")
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
     
-    if LOG_WITH_TITLE:
-        print(f"--- Checking board: {board_name} ({board_id}) ---")
-    else:
-        print(f"--- Checking board: {board_id} ---")
+    print(f"--- Checking board: {board_id} ---")
     
     articles = soup.select("article.resentry")
     if not articles:
-        print(f" [LOG] 記事が見つかりません。")
         continue
 
     last_post_id = load_last_post_id(board_id)
     newest_processed_id = last_post_id
 
-    # 記事を古い順に処理し、last_post_id より大きいものを全て検知する元のロジック
+    # 古い順にループ
     for article in reversed(articles):
         eno_tag = article.select_one("span.eno a")
         if eno_tag is None: continue 
@@ -218,14 +194,14 @@ for target in url_list:
             post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
         except Exception: continue
 
-        # 最後に送ったID以下のものはスキップ（これが正しい差分検知）
+        # ここが重要：保存されたIDより大きいものはすべて処理する
         if last_post_id is not None and post_id <= last_post_id:
             continue
         
         if post_id in sent_post_ids:
             continue
             
-        if last_post_id is None:
+        if last_id := last_post_id is None:
             newest_processed_id = max(newest_processed_id or 0, post_id)
             continue
 
