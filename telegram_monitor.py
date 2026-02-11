@@ -14,6 +14,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
+# 検証用：特定の掲示板と番号を強制的に狙い撃つ設定
+DEBUG_TARGETS = {
+    "2deSYWUkc5": 861,
+    "tYEKGkE0Kj": 32
+}
+
 # 必須チェック
 missing = []
 if not TELEGRAM_BOT_TOKEN: missing.append("TELEGRAM_BOT_TOKEN")
@@ -135,6 +141,8 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
         send_group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
         # 最初のメディアにのみキャプションをつけることも可能ですが、別途メッセージを送るためここでは送信のみ
         requests.post(send_group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(media_group)})
+    else:
+        print(f"      [DEBUG] 有効なメディアファイルURLが見つかりませんでした。")
 
     # 3. テキストとインラインボタンの送信
     # 冒頭300文字程度を引用
@@ -168,82 +176,4 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
         else:
             print(f"      [ERROR] Telegram送信失敗: {resp.text}")
     except Exception as e:
-        print(f"      [ERROR] 通信エラー: {e}")
-
-# ===== メイン処理 =====
-for target in url_list:
-    board_id = get_board_id(target)
-    print(f"--- Checking board: {board_id} ---")
-    try:
-        resp = requests.get(target, headers=headers, timeout=15)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f" [ERROR] ボード読み込み失敗 ({target}): {e}")
-        continue
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    
-    # 掲示板タイトル取得
-    board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
-    
-    articles = soup.select("article.resentry")
-    if not articles: continue
-
-    # 最新の件数を対象とする（既読IDより大きいものをすべて取得）
-    last_post_id = load_last_post_id(board_id)
-    newest_post_id = last_post_id if last_post_id else 0
-    
-    # 逆順（古い順）に処理して新着を漏らさない
-    for article in articles:
-        eno_tag = article.select_one("span.eno a")
-        if eno_tag is None: continue 
-        try:
-            post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
-        except: continue
-
-        if last_post_id is not None and post_id <= last_post_id:
-            continue
-            
-        if post_id in sent_post_ids: continue
-        
-        # newest_post_id の更新
-        if post_id > newest_post_id: newest_post_id = post_id
-        
-        print(f"  -> [NEW] 投稿#{post_id} を処理中...")
-        time_tag = article.select_one("time.date")
-        posted_at = time_tag.get_text(strip=True) if time_tag else "N/A"
-        comment_div = article.select_one("div.comment")
-        body_text = comment_div.get_text("\n", strip=True) if comment_div else ""
-
-        media_urls = []
-        
-        # 本文からの抽出
-        urls_in_body = extract_urls(body_text)
-        for u in urls_in_body:
-            if "disp" in u or "upup.be" in u: media_urls.append(u)
-
-        # サムネイルリストからの抽出
-        thumblist = article.select(".filethumblist li")
-        for li in thumblist:
-            a_tag = li.select_one("a[href]")
-            if a_tag:
-                abs_url = urljoin(target, a_tag.get("href"))
-                media_urls.append(abs_url)
-
-        if not media_urls:
-            print(f"  -> 投稿#{post_id} は画像/動画がないためスキップ。")
-            continue
-
-        # 投稿への直接URL（掲示板URLに番号を付加）
-        # クエリパラメータ ?from=new2 などがついている場合を考慮
-        base_target = target.split('?')[0].rstrip('/')
-        target_post_url = f"{base_target}/{post_id}"
-        
-        send_telegram_media_group(
-            board_name, board_id, post_id, posted_at, body_text, 
-            target_post_url, list(dict.fromkeys(media_urls))
-        )
-        sent_post_ids.add(post_id)
-
-    if newest_post_id > (last_post_id if last_post_id else 0):
-        save_last_post_id(board_id, newest_post_id)
+        print(f"      [ERROR] 通
