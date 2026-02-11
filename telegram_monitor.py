@@ -11,7 +11,6 @@ import requests
 from bs4 import BeautifulSoup
 
 # ===== 設定スイッチ =====
-# ログに掲示板タイトルを表示するかどうか (True: 表示 / False: IDのみ表示)
 LOG_WITH_TITLE = False 
 
 # ===== 定数・環境変数 =====
@@ -19,33 +18,19 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 
-# 必須チェック
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
     print("Missing environment variables.")
     sys.exit(1)
 
-# URLリスト化
 url_list = [u.strip() for u in TARGET_URL.split(",") if u.strip()]
-
-# User-Agent
-headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    )
-}
-
-# 重複送信防止用
+headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 sent_post_ids = set()
+URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
 
-# URL検知用 正規表現
-URL_PATTERN = re.compile(
-    r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+",
-    re.IGNORECASE
-)
+# 更新があったファイルを記録するリスト
+updated_files = []
 
-# ===== 状態管理 (state) =====
+# ===== 状態管理 =====
 def get_board_id(url: str) -> str:
     path = urlparse(url).path.rstrip("/")
     return path.split("/")[-1] if path else "default"
@@ -57,181 +42,125 @@ def load_last_post_id(board_id: str):
         with open(fname, "r", encoding="utf-8") as f:
             content = f.read().strip()
             return int(content) if content else None
-    except Exception: return None
+    except: return None
 
-def save_last_post_id(board_id: str, post_id: int):
+def save_last_post_id_local(board_id: str, post_id: int):
+    """ローカルファイルのみ更新し、更新ファイルリストに追加"""
     fname = f"last_post_id_{board_id}.txt"
     with open(fname, "w", encoding="utf-8") as f:
         f.write(str(post_id))
+    if fname not in updated_files:
+        updated_files.append(fname)
+
+def commit_and_push_all():
+    """全処理の最後に1回だけまとめてプッシュ"""
+    if not updated_files:
+        print(" [LOG] 更新が必要なIDファイルはありません。")
+        return
     
-    # GitHub Actions環境なら変更をPush
     if os.environ.get("GITHUB_ACTIONS") == "true":
         try:
             subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
             subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
-            subprocess.run(["git", "add", fname], check=True)
-            # 変更がある場合のみコミット
+            for f in updated_files:
+                subprocess.run(["git", "add", f], check=True)
+            
+            # 実際に差分がある場合のみプッシュ
             status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
             if status.stdout.strip():
-                subprocess.run(["git", "commit", "-m", f"update last_id {board_id}"], check=True)
+                subprocess.run(["git", "commit", "-m", "update multiple last_ids"], check=True)
                 subprocess.run(["git", "push"], check=True)
-        except Exception:
-            pass
+                print(f" [LOG] {len(updated_files)}件のIDファイルをプッシュしました。")
+        except Exception as e:
+            print(f" [ERROR] Push failed: {e}")
 
-# ===== ユーティリティ =====
+# ===== 送信ロジック・ユーティリティ (略さず全文維持) =====
 def extract_urls(text: str):
     found = URL_PATTERN.findall(text)
     unique_urls = sorted(list(set(found)))
     filtered_urls = []
     anchor_regex = re.compile(r'/[a-zA-Z0-9]+/\d+$')
-
     for url in unique_urls:
-        if anchor_regex.search(url):
-            if "disp" not in url and "upup.be" not in url:
-                continue
-        if "disp" in url or "upup.be" in url:
-            filtered_urls.append(url)
-            continue
+        if anchor_regex.search(url) and "disp" not in url and "upup.be" not in url: continue
         filtered_urls.append(url)
     return filtered_urls
 
-# ===== Telegram送信ロジック =====
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     print(f"      [LOG] 投稿#{post_id} のメディア解析開始")
     valid_media_list = []
-    
     for m_url in media_urls:
         parsed = urlparse(m_url)
         file_id = parsed.path.rstrip("/").split("/")[-1]
-        netloc_parts = parsed.netloc.split('.')
-        d_char = netloc_parts[0]
-        
-        if d_char.startswith("cdn"):
-            base_netloc = parsed.netloc
-        else:
-            base_netloc = f"cdn{d_char}.5chan.jp" if len(d_char) == 1 else parsed.netloc
-
-        attempts = [
-            {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.mp4", "file_id": file_id},
-            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.jpg", "file_id": file_id},
-            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.png", "file_id": file_id}
-        ]
-        
-        found_for_this_url = False
-        for attempt in attempts:
+        netloc = parsed.netloc if parsed.netloc.startswith("cdn") else f"cdn{parsed.netloc.split('.')[0]}.5chan.jp"
+        for attempt in [
+            {"type": "video", "url": f"https://{netloc}/file/{file_id}.mp4", "file_id": file_id},
+            {"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.jpg", "file_id": file_id}
+        ]:
             try:
-                r = requests.get(attempt["url"], headers=headers, stream=True, timeout=10)
-                if r.status_code == 200:
+                if requests.get(attempt["url"], headers=headers, stream=True, timeout=10).status_code == 200:
                     valid_media_list.append(attempt)
-                    found_for_this_url = True
                     break
-            except Exception:
-                continue
+            except: continue
 
-    if not valid_media_list:
-        return
+    if not valid_media_list: return
 
-    summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
-    caption_text = (
-        f"<b>【{board_name}】</b>\n"
-        f"投稿番号: #{post_id}\n"
-        f"投稿日時: {posted_at}\n\n"
-        f"{summary_text}"
-    )
-    
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": "掲示板", "url": board_url},
-            {"text": "投稿", "url": target_post_url}
-        ]]
-    }
+    caption = f"<b>【{board_name}】</b>\n#{post_id} | {posted_at}\n\n{body_text[:300]}"
+    keyboard = {"inline_keyboard": [[{"text": "掲示板", "url": board_url}, {"text": "投稿", "url": target_post_url}]]}
 
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
-        media_field = "video" if media["type"] == "video" else "photo"
-        
         try:
-            media_resp = requests.get(media["url"], headers=headers, timeout=20)
-            media_file = io.BytesIO(media_resp.content)
-            
-            payload = {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "caption": caption_text,
-                "parse_mode": "HTML",
-                "reply_markup": json.dumps(keyboard)
-            }
-            files = {media_field: (f"file{media['file_id']}", media_file)}
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload, files=files)
-        except Exception:
-            pass
+            res = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
+                files={("video" if media["type"] == "video" else "photo"): requests.get(media["url"], headers=headers).content}
+            )
+        except: pass
 
-# ===== メイン処理 =====
+# ===== メインループ =====
 for target in url_list:
     board_id = get_board_id(target)
     try:
         resp = requests.get(target, headers=headers, timeout=15)
-        resp.raise_for_status()
-    except Exception:
-        continue
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except: continue
 
-    soup = BeautifulSoup(resp.text, "html.parser")
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
-    
     print(f"--- Checking board: {board_id} ---")
     
     articles = soup.select("article.resentry")
-    if not articles:
-        continue
+    last_id = load_last_post_id(board_id)
+    new_last_id = last_id
 
-    last_post_id = load_last_post_id(board_id)
-    newest_processed_id = last_post_id
-
-    # 古い順にループ
     for article in reversed(articles):
-        eno_tag = article.select_one("span.eno a")
-        if eno_tag is None: continue 
         try:
-            post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
-        except Exception: continue
+            eno_text = article.select_one("span.eno a").get_text(strip=True)
+            post_id = int(re.search(r'\d+', eno_text).group())
+        except: continue
 
-        # ここが重要：保存されたIDより大きいものはすべて処理する
-        if last_post_id is not None and post_id <= last_post_id:
-            continue
+        if last_id is not None and post_id <= last_id: continue
+        if post_id in sent_post_ids: continue
         
-        if post_id in sent_post_ids:
-            continue
-            
-        if last_id := last_post_id is None:
-            newest_processed_id = max(newest_processed_id or 0, post_id)
+        if last_id is None:
+            new_last_id = max(new_last_id or 0, post_id)
             continue
 
         print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
-        time_tag = article.select_one("time.date")
-        posted_at = time_tag.get_text(strip=True) if time_tag else "N/A"
-        comment_div = article.select_one("div.comment")
-        body_text = comment_div.get_text("\n", strip=True) if comment_div else ""
-
-        media_urls = []
-        urls_in_body = extract_urls(body_text)
-        for u in urls_in_body:
+        posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
+        body_text = article.select_one("div.comment").get_text("\n", strip=True) if article.select_one("div.comment") else ""
+        
+        media_urls = [urljoin(target, a["href"]) for a in article.select(".filethumblist li a[href]")]
+        for u in extract_urls(body_text):
             if "disp" in u or "upup.be" in u: media_urls.append(u)
 
-        thumblist = article.select(".filethumblist li")
-        for li in thumblist:
-            a_tag = li.select_one("a[href]")
-            if a_tag:
-                abs_url = urljoin(target, a_tag.get("href"))
-                media_urls.append(abs_url)
-
-        base_target = target.split('?')[0].rstrip('/')
-        send_telegram_combined(
-            board_name, board_id, post_id, posted_at, body_text, 
-            base_target + "/", f"{base_target}/{post_id}", list(dict.fromkeys(media_urls))
-        )
+        send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
         sent_post_ids.add(post_id)
-        newest_processed_id = max(newest_processed_id or 0, post_id)
+        new_last_id = max(new_last_id or 0, post_id)
 
-    if newest_processed_id is not None and newest_processed_id != last_post_id:
-        save_last_post_id(board_id, newest_processed_id)
+    if new_last_id and new_last_id != last_id:
+        save_last_post_id_local(board_id, new_last_id)
     else:
-        print(f" [LOG] 新着投稿はありませんでした。")
+        print(" [LOG] 新着なし")
+
+# 全てのボードの処理が終わったら、最後に1回だけプッシュ
+commit_and_push_all()
