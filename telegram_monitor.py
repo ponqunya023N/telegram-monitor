@@ -87,15 +87,15 @@ def extract_urls(text: str):
     return filtered_urls
 
 # ===== Telegram送信ロジック =====
-def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_text, target_post_url, media_urls):
+def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     """
-    メディアをグループ（アルバム）として送信し、
-    その直後に詳細情報と「ブラウザで開く」ボタンを送信する。
+    メディアをグループ（アルバム）として送信する。
+    1枚目のメディアにテキスト詳細とダブルボタンをキャプションとして付与する。
     """
     print(f"      [DEBUG] Telegramへ送信を試みます... (Media: {len(media_urls)})")
     
-    # 1. メディアの準備 (最大10枚)
-    media_group = []
+    # 1. メディアの準備
+    final_media_list = []
     processed_count = 0
     
     for m_url in media_urls:
@@ -106,41 +106,31 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
         d_char = parsed.netloc.split('.')[0]
         base_netloc = parsed.netloc if d_char.startswith("cdn") else f"cdn{d_char}.5chan.jp"
 
-        attempt_urls = [
-            f"https://{base_netloc}/file/plane/{file_id}.jpg",
-            f"https://{base_netloc}/file/{file_id}.mp4",
-            f"https://{base_netloc}/file/plane/{file_id}.png",
-            f"https://{base_netloc}/file/{file_id}.gif"
-        ]
-        if "." in file_id: attempt_urls.insert(0, m_url)
+        # 拡張子判別とURL組み立て
+        ext = m_url.split('.')[-1].lower()
+        if ext in ["mp4", "mov", "webm"]:
+            media_type = "video"
+            target_download_url = f"https://{base_netloc}/file/{file_id}.mp4"
+        else:
+            media_type = "photo"
+            target_download_url = f"https://{base_netloc}/file/plane/{file_id}.jpg"
 
-        for target_download_url in attempt_urls:
-            try:
-                r = requests.head(target_download_url, headers=headers, timeout=10)
-                if r.status_code == 200:
-                    content_type = r.headers.get('Content-Type', '').lower()
-                    ext = target_download_url.split('.')[-1].lower()
-                    
-                    if "video" in content_type or ext in ["mp4", "mov", "webm"]:
-                        media_type = "video"
-                    else:
-                        media_type = "photo"
-                        
-                    media_group.append({"type": media_type, "media": target_download_url})
-                    processed_count += 1
-                    break
-            except: continue
+        # デバッグ: 組み立てたURLを表示
+        print(f"      [DEBUG] 試行URL: {target_download_url}")
 
-    # 2. メディアグループの送信
-    if media_group:
-        send_group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
-        requests.post(send_group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(media_group)})
-    else:
-        print(f"      [DEBUG] 有効なメディアが見つかりませんでした。")
+        try:
+            r = requests.head(target_download_url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                final_media_list.append({"type": media_type, "media": target_download_url})
+                processed_count += 1
+            else:
+                print(f"      [DEBUG] 404/不可アクセス: {target_download_url} (Status: {r.status_code})")
+        except Exception as e:
+            print(f"      [DEBUG] HEADリクエストエラー: {e}")
+            continue
 
-    # 3. テキストとインラインボタンの送信
+    # テキストとボタンの準備
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
-    
     message_text = (
         f"<b>【{board_name}】</b>\n"
         f"投稿番号: #{post_id}\n"
@@ -148,28 +138,51 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
         f"{summary_text}"
     )
     
+    # ダブルボタン（横並び）
     keyboard = {
         "inline_keyboard": [[
-            {"text": "🌐 ブラウザで詳細を確認", "url": target_post_url}
+            {"text": "掲示板-直リンク", "url": board_url},
+            {"text": "投稿-直リンク", "url": target_post_url}
         ]]
     }
-    
-    send_msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message_text,
-        "parse_mode": "HTML",
-        "reply_markup": json.dumps(keyboard)
-    }
-    
-    try:
+
+    # 2. 送信処理
+    if not final_media_list:
+        print(f"      [DEBUG] 有効なメディアが見つかりませんでした。テキストのみ送信します。")
+        send_msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message_text,
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard)
+        }
         resp = requests.post(send_msg_url, data=payload)
-        if resp.status_code == 200:
-            print(f"      [SUCCESS] 投稿#{post_id} の送信完了。")
-        else:
-            print(f"      [ERROR] Telegram送信失敗: {resp.text}")
-    except Exception as e:
-        print(f"      [ERROR] 通信エラー: {e}")
+    else:
+        # アルバム送信 (sendMediaGroup)
+        # 1枚目にキャプションとパースモード、ボタン（ただしGroupはボタン非対応のため別途送るか検討）を付与
+        # ※sendMediaGroupはボタンをサポートしていないため、アルバム+テキストメッセージの2通に分けます。
+        
+        send_group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
+        # 1枚目にのみキャプションを付ける
+        final_media_list[0]["caption"] = message_text
+        final_media_list[0]["parse_mode"] = "HTML"
+        
+        resp_group = requests.post(send_group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(final_media_list)})
+        print(f"      [DEBUG] sendMediaGroup response: {resp_group.status_code}")
+        
+        # アルバムにはボタンが付かないため、ボタン付きのメッセージを別途送信
+        send_msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": f"⤴️ #{post_id} のリンクはこちら",
+            "reply_markup": json.dumps(keyboard)
+        }
+        resp = requests.post(send_msg_url, data=payload)
+
+    if resp.status_code == 200:
+        print(f"      [SUCCESS] 投稿#{post_id} の送信完了。")
+    else:
+        print(f"      [ERROR] Telegram送信失敗: {resp.text}")
 
 # ===== メイン処理 =====
 for target in url_list:
@@ -227,19 +240,15 @@ for target in url_list:
                 abs_url = urljoin(target, a_tag.get("href"))
                 media_urls.append(abs_url)
 
-        if not media_urls:
-            print(f"  -> 投稿#{post_id} はメディアなしのためスキップ。")
-            continue
-
+        # URLの準備
         base_target = target.split('?')[0].rstrip('/')
         target_post_url = f"{base_target}/{post_id}"
+        board_url = base_target + "/"
         
         send_telegram_media_group(
             board_name, board_id, post_id, posted_at, body_text, 
-            target_post_url, list(dict.fromkeys(media_urls))
+            board_url, target_post_url, list(dict.fromkeys(media_urls))
         )
         sent_post_ids.add(post_id)
 
-    # 検証中は既読更新をスキップ（何度でもテストできるように）
-    # if newest_post_id > (last_post_id if last_post_id else 0):
-    #     save_last_post_id(board_id, newest_post_id)
+    # 検証中は既読更新をスキップ
