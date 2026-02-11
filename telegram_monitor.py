@@ -60,8 +60,11 @@ def commit_and_push_all():
     
     if os.environ.get("GITHUB_ACTIONS") == "true":
         try:
+            # git設定
             subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
             subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
+            
+            # 変更のあったファイルをステージング
             for f in updated_files:
                 subprocess.run(["git", "add", f], check=True)
             
@@ -69,8 +72,12 @@ def commit_and_push_all():
             status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
             if status.stdout.strip():
                 subprocess.run(["git", "commit", "-m", "update multiple last_ids"], check=True)
+                # rebaseして競合を回避しやすくする
+                subprocess.run(["git", "pull", "--rebase"], check=False)
                 subprocess.run(["git", "push"], check=True)
                 print(f" [LOG] {len(updated_files)}件のIDファイルをプッシュしました。")
+            else:
+                print(" [LOG] 差分が検出されなかったためプッシュをスキップします。")
         except Exception as e:
             print(f" [ERROR] Push failed: {e}")
 
@@ -97,7 +104,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             {"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.jpg", "file_id": file_id}
         ]:
             try:
-                # stream=Trueを使用してヘッダーのみチェック
+                # stream=Trueを使用してヘッダーのみチェックし高速化
                 if requests.get(attempt["url"], headers=headers, stream=True, timeout=10).status_code == 200:
                     valid_media_list.append(attempt)
                     break
@@ -133,6 +140,7 @@ for target in url_list:
     last_id = load_last_post_id(board_id)
     new_last_id = last_id
 
+    # 記事は新しい順に並んでいることが多いため、古い順（昇順）に処理するためにreverseする
     for article in reversed(articles):
         try:
             eno_text = article.select_one("span.eno a").get_text(strip=True)
@@ -142,7 +150,8 @@ for target in url_list:
         if last_id is not None and post_id <= last_id: continue
         if post_id in sent_post_ids: continue
         
-        # 初回実行時はIDの更新のみ行う
+        # 初回実行時（last_idがない場合）は通知せず、現在の最新IDを記録するだけに留める
+        # ※必要に応じてここを通知するように変更可能
         if last_id is None:
             new_last_id = max(new_last_id or 0, post_id)
             continue
@@ -159,6 +168,7 @@ for target in url_list:
         sent_post_ids.add(post_id)
         new_last_id = max(new_last_id or 0, post_id)
 
+    # ループ終了後にローカルファイルを更新
     if new_last_id and new_last_id != last_id:
         save_last_post_id_local(board_id, new_last_id)
     else:
