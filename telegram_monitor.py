@@ -81,12 +81,12 @@ def extract_urls(text: str):
     return filtered_urls
 
 # ===== Telegram送信ロジック =====
-def send_telegram_media_group(board_id, post_id, posted_at, body_text, target_post_url, media_urls):
+def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_text, target_post_url, media_urls):
     """
     メディアをグループ（アルバム）として送信し、
     その直後に詳細情報と「ブラウザで開く」ボタンを送信する。
     """
-    print(f"     [DEBUG] Telegramへ送信を試みます... (Media: {len(media_urls)})")
+    print(f"      [DEBUG] Telegramへ送信を試みます... (Media: {len(media_urls)})")
     
     # 1. メディアの準備 (最大10枚)
     media_group = []
@@ -98,7 +98,8 @@ def send_telegram_media_group(board_id, post_id, posted_at, body_text, target_po
         parsed = urlparse(m_url)
         file_id = parsed.path.rstrip("/").split("/")[-1]
         d_char = parsed.netloc.split('.')[0]
-        base_netloc = base_netloc = parsed.netloc if d_char.startswith("cdn") else f"cdn{d_char}.5chan.jp"
+        # cdnX.5chan.jp 形式への補正
+        base_netloc = parsed.netloc if d_char.startswith("cdn") else f"cdn{d_char}.5chan.jp"
 
         # 試行URLリスト（画像優先 -> 動画）
         attempt_urls = [
@@ -107,15 +108,23 @@ def send_telegram_media_group(board_id, post_id, posted_at, body_text, target_po
             f"https://{base_netloc}/file/plane/{file_id}.png",
             f"https://{base_netloc}/file/{file_id}.gif"
         ]
+        # 元のURLに拡張子が含まれている場合は最優先
         if "." in file_id: attempt_urls.insert(0, m_url)
 
         for target_download_url in attempt_urls:
-            # Telegram APIはURLを直接受け取れるため、存否確認のみ行う
             try:
+                # HEADリクエストで存在確認
                 r = requests.head(target_download_url, headers=headers, timeout=10)
                 if r.status_code == 200:
+                    # Content-Type または拡張子から種別判断
+                    content_type = r.headers.get('Content-Type', '').lower()
                     ext = target_download_url.split('.')[-1].lower()
-                    media_type = "video" if ext in ["mp4", "mov", "webm"] else "photo"
+                    
+                    if "video" in content_type or ext in ["mp4", "mov", "webm"]:
+                        media_type = "video"
+                    else:
+                        media_type = "photo"
+                        
                     media_group.append({"type": media_type, "media": target_download_url})
                     processed_count += 1
                     break
@@ -124,19 +133,23 @@ def send_telegram_media_group(board_id, post_id, posted_at, body_text, target_po
     # 2. メディアグループの送信
     if media_group:
         send_group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
+        # 最初のメディアにのみキャプションをつけることも可能ですが、別途メッセージを送るためここでは送信のみ
         requests.post(send_group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(media_group)})
 
     # 3. テキストとインラインボタンの送信
+    # 冒頭300文字程度を引用
+    summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
+    
     message_text = (
-        f"【新着投稿: {board_id}】\n"
-        f"No: {post_id}\n"
-        f"日時: {posted_at}\n\n"
-        f"{body_text[:500]}" # 長すぎる場合はカット
+        f"<b>【{board_name}】</b>\n"
+        f"投稿番号: #{post_id}\n"
+        f"投稿日時: {posted_at}\n\n"
+        f"{summary_text}"
     )
     
     keyboard = {
         "inline_keyboard": [[
-            {"text": "🌐 ブラウザで開く", "url": target_post_url}
+            {"text": "🌐 ブラウザで詳細を確認", "url": target_post_url}
         ]]
     }
     
@@ -144,17 +157,18 @@ def send_telegram_media_group(board_id, post_id, posted_at, body_text, target_po
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message_text,
+        "parse_mode": "HTML", # 太字を有効にする
         "reply_markup": json.dumps(keyboard)
     }
     
     try:
         resp = requests.post(send_msg_url, data=payload)
         if resp.status_code == 200:
-            print(f"     [SUCCESS] 投稿#{post_id} の送信完了。")
+            print(f"      [SUCCESS] 投稿#{post_id} の送信完了。")
         else:
-            print(f"     [ERROR] Telegram送信失敗: {resp.text}")
+            print(f"      [ERROR] Telegram送信失敗: {resp.text}")
     except Exception as e:
-        print(f"     [ERROR] 通信エラー: {e}")
+        print(f"      [ERROR] 通信エラー: {e}")
 
 # ===== メイン処理 =====
 for target in url_list:
@@ -168,28 +182,32 @@ for target in url_list:
         continue
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    articles = soup.select("article.resentry")
     
+    # 掲示板タイトル取得
+    board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
+    
+    articles = soup.select("article.resentry")
     if not articles: continue
 
-    # 最新の1件のみを対象とする
-    target_articles = articles[-1:]
+    # 最新の件数を対象とする（既読IDより大きいものをすべて取得）
     last_post_id = load_last_post_id(board_id)
-    newest_post_id = None
+    newest_post_id = last_post_id if last_post_id else 0
     
-    for article in reversed(target_articles):
+    # 逆順（古い順）に処理して新着を漏らさない
+    for article in articles:
         eno_tag = article.select_one("span.eno a")
         if eno_tag is None: continue 
         try:
             post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
         except: continue
 
-        if newest_post_id is None or post_id > newest_post_id: newest_post_id = post_id
-        
-        if post_id in sent_post_ids: continue
         if last_post_id is not None and post_id <= last_post_id:
-            print(f"  -> 投稿#{post_id} (既読のためスキップ)")
             continue
+            
+        if post_id in sent_post_ids: continue
+        
+        # newest_post_id の更新
+        if post_id > newest_post_id: newest_post_id = post_id
         
         print(f"  -> [NEW] 投稿#{post_id} を処理中...")
         time_tag = article.select_one("time.date")
@@ -216,12 +234,16 @@ for target in url_list:
             print(f"  -> 投稿#{post_id} は画像/動画がないためスキップ。")
             continue
 
-        target_post_url = f"{target.rstrip('/')}/{post_id}"
+        # 投稿への直接URL（掲示板URLに番号を付加）
+        # クエリパラメータ ?from=new2 などがついている場合を考慮
+        base_target = target.split('?')[0].rstrip('/')
+        target_post_url = f"{base_target}/{post_id}"
+        
         send_telegram_media_group(
-            board_id, post_id, posted_at, body_text, 
+            board_name, board_id, post_id, posted_at, body_text, 
             target_post_url, list(dict.fromkeys(media_urls))
         )
         sent_post_ids.add(post_id)
 
-    if newest_post_id is not None:
+    if newest_post_id > (last_post_id if last_post_id else 0):
         save_last_post_id(board_id, newest_post_id)
