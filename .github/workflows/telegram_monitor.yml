@@ -34,3 +34,5 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
         run: python telegram_monitor.py
+      
+      # Commit and pushステップはPythonスクリプト内に統合したため削除
