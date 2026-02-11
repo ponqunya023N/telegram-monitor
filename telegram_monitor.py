@@ -74,14 +74,14 @@ def extract_urls(text: str):
     found = URL_PATTERN.findall(text)
     unique_urls = sorted(list(set(found)))
     filtered_urls = []
+    
+    # アンカーリンク（/掲示板ID/数字）を判定する正規表現を厳格化
+    # 例: https://c.5chan.jp/tYEKGkE0Kj/391
+    anchor_regex = re.compile(r'/[a-zA-Z0-9]+/\d+$')
+
     for url in unique_urls:
-        parsed = urlparse(url)
-        path = parsed.path.rstrip("/")
-        last_segment = path.split("/")[-1] if "/" in path else ""
-        
-        # 投稿番号へのリンク（例: .../掲示板ID/391）を確実に除外する
-        if last_segment.isdigit():
-            # ただし disp などの特定のディレクトリを含む場合はメディア候補として残す
+        if anchor_regex.search(url):
+            # disp や upup.be が含まれない、純粋なアンカーリンクは無視
             if "disp" not in url and "upup.be" not in url:
                 continue
                 
@@ -108,11 +108,10 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         netloc_parts = parsed.netloc.split('.')
         d_char = netloc_parts[0]
         
-        # cdnから始まるドメインならそのまま使い、そうでなければ補完する
         if d_char.startswith("cdn"):
             base_netloc = parsed.netloc
         else:
-            # サンプルのように c, e 等の1文字の場合は cdnX.5chan.jp にする
+            # c, e 等の1文字ドメインを cdnX.5chan.jp に変換
             base_netloc = f"cdn{d_char}.5chan.jp" if len(d_char) == 1 else parsed.netloc
 
         attempts = [
@@ -134,6 +133,11 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         if not found_for_this_url:
             print(f"      [LOG] メディア特定失敗: {m_url}")
 
+    # メディアが1つも特定できなかった場合は、通知そのものをスキップする（不要な通知を防止）
+    if not valid_media_list:
+        print(f"      [LOG] 有効メディアなし。この投稿の通知をスキップします。")
+        return
+
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
     caption_text = (
         f"<b>【{board_name}】</b>\n"
@@ -148,17 +152,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             {"text": "投稿", "url": target_post_url}
         ]]
     }
-
-    if not valid_media_list:
-        print(f"      [LOG] 有効メディアなし。テキストのみ送信します。")
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": caption_text,
-            "parse_mode": "HTML",
-            "reply_markup": json.dumps(keyboard)
-        }
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data=payload)
-        return
 
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
