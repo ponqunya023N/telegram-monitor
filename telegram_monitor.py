@@ -41,9 +41,6 @@ headers = {
     )
 }
 
-# 重複送信防止用
-sent_post_ids = set()
-
 # URL検知用 正規表現
 URL_PATTERN = re.compile(
     r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+",
@@ -51,23 +48,10 @@ URL_PATTERN = re.compile(
 )
 
 # ===== 状態管理 (state) =====
+# Workers側で既読管理を行うため、Python側のファイル読み書き(load/save_last_post_id)は使用せず最小限に維持
 def get_board_id(url: str) -> str:
     path = urlparse(url).path.rstrip("/")
     return path.split("/")[-1] if path else "default"
-
-def load_last_post_id(board_id: str):
-    fname = f"last_post_id_{board_id}.txt"
-    if not os.path.exists(fname): return None
-    try:
-        with open(fname, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-            return int(content) if content else None
-    except Exception: return None
-
-def save_last_post_id(board_id: str, post_id: int):
-    fname = f"last_post_id_{board_id}.txt"
-    with open(fname, "w", encoding="utf-8") as f:
-        f.write(str(post_id))
 
 # ===== ユーティリティ =====
 def extract_urls(text: str):
@@ -76,7 +60,6 @@ def extract_urls(text: str):
     filtered_urls = []
     
     # アンカーリンク（/掲示板ID/数字）を判定する正規表現を厳格化
-    # 例: https://c.5chan.jp/tYEKGkE0Kj/391
     anchor_regex = re.compile(r'/[a-zA-Z0-9]+/\d+$')
 
     for url in unique_urls:
@@ -111,7 +94,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         if d_char.startswith("cdn"):
             base_netloc = parsed.netloc
         else:
-            # c, e 等の1文字ドメインを cdnX.5chan.jp に変換
             base_netloc = f"cdn{d_char}.5chan.jp" if len(d_char) == 1 else parsed.netloc
 
         attempts = [
@@ -123,7 +105,8 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         found_for_this_url = False
         for attempt in attempts:
             try:
-                r = requests.head(attempt["url"], headers=headers, timeout=10)
+                # HEADより確実な存在確認のため、GETのstream=Trueでヘッダーのみチェック
+                r = requests.get(attempt["url"], headers=headers, stream=True, timeout=10)
                 if r.status_code == 200:
                     valid_media_list.append(attempt)
                     print(f"      [LOG] メディア特定成功: {attempt['type']} -> {attempt['url']}")
@@ -133,7 +116,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         if not found_for_this_url:
             print(f"      [LOG] メディア特定失敗: {m_url}")
 
-    # メディアが1つも特定できなかった場合は、通知そのものをスキップする（不要な通知を防止）
+    # メディアが1つも特定できなかった場合は、通知そのものをスキップ（不要な通知を防止）
     if not valid_media_list:
         print(f"      [LOG] 有効メディアなし。この投稿の通知をスキップします。")
         return
@@ -195,7 +178,6 @@ for target in url_list:
     soup = BeautifulSoup(resp.text, "html.parser")
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
     
-    # スイッチに基づいてログ表示を切り替え
     if LOG_WITH_TITLE:
         print(f"--- Checking board: {board_name} ({board_id}) ---")
     else:
@@ -206,58 +188,38 @@ for target in url_list:
         print(f" [LOG] 記事が見つかりません。")
         continue
 
-    last_post_id = load_last_post_id(board_id)
-    newest_post_id = last_post_id if last_post_id else 0
-    is_initial_run = (last_post_id is None)
+    # Workers側で新着判定が完了しているため、Python側では「最新の1件」のみを解析対象にする
+    # これにより過去の既読管理ファイルへの依存をなくし、重複を物理的に防止する
+    article = articles[0]
+    eno_tag = article.select_one("span.eno a")
+    if eno_tag is None: continue 
+    try:
+        post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
+    except: continue
 
-    for article in reversed(articles):
-        eno_tag = article.select_one("span.eno a")
-        if eno_tag is None: continue 
-        try:
-            post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
-        except: continue
+    print(f"  -> [CHECK] 最新投稿#{post_id} を解析します。")
+    time_tag = article.select_one("time.date")
+    posted_at = time_tag.get_text(strip=True) if time_tag else "N/A"
+    comment_div = article.select_one("div.comment")
+    body_text = comment_div.get_text("\n", strip=True) if comment_div else ""
 
-        if post_id > newest_post_id:
-            newest_post_id = post_id
+    media_urls = []
+    urls_in_body = extract_urls(body_text)
+    for u in urls_in_body:
+        if "disp" in u or "upup.be" in u: media_urls.append(u)
 
-        if last_post_id is not None and post_id <= last_post_id:
-            continue
-        if post_id in sent_post_ids:
-            continue
-            
-        if is_initial_run:
-            continue
+    thumblist = article.select(".filethumblist li")
+    for li in thumblist:
+        a_tag = li.select_one("a[href]")
+        if a_tag:
+            abs_url = urljoin(target, a_tag.get("href"))
+            media_urls.append(abs_url)
 
-        print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
-        time_tag = article.select_one("time.date")
-        posted_at = time_tag.get_text(strip=True) if time_tag else "N/A"
-        comment_div = article.select_one("div.comment")
-        body_text = comment_div.get_text("\n", strip=True) if comment_div else ""
+    base_target = target.split('?')[0].rstrip('/')
+    # 重複防止のため、ここで1件だけ処理してこの掲示板のループを抜ける
+    send_telegram_combined(
+        board_name, board_id, post_id, posted_at, body_text, 
+        base_target + "/", f"{base_target}/{post_id}", list(dict.fromkeys(media_urls))
+    )
 
-        media_urls = []
-        urls_in_body = extract_urls(body_text)
-        for u in urls_in_body:
-            if "disp" in u or "upup.be" in u: media_urls.append(u)
-
-        thumblist = article.select(".filethumblist li")
-        for li in thumblist:
-            a_tag = li.select_one("a[href]")
-            if a_tag:
-                abs_url = urljoin(target, a_tag.get("href"))
-                media_urls.append(abs_url)
-
-        base_target = target.split('?')[0].rstrip('/')
-        send_telegram_combined(
-            board_name, board_id, post_id, posted_at, body_text, 
-            base_target + "/", f"{base_target}/{post_id}", list(dict.fromkeys(media_urls))
-        )
-        sent_post_ids.add(post_id)
-
-    if newest_post_id > (last_post_id or 0):
-        if is_initial_run:
-            print(f" [LOG] 初回実行のため、最新ID #{newest_post_id} を記録して終了します。")
-        else:
-            print(f" [LOG] 既読IDを #{newest_post_id} に更新します。")
-        save_last_post_id(board_id, newest_post_id)
-    else:
-        print(f" [LOG] 新着投稿はありませんでした。")
+print(" [LOG] 全ての処理が完了しました。")
