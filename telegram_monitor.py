@@ -170,16 +170,22 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
 # ===== メイン処理 =====
 for target in url_list:
     board_id = get_board_id(target)
-    print(f"--- Checking board: {board_id} ---")
+    
     try:
         resp = requests.get(target, headers=headers, timeout=15)
         resp.raise_for_status()
     except Exception as e:
+        # 接続失敗時はタイトルが取れないためIDを表示
+        print(f"--- Checking board: {board_id} ---")
         print(f" [ERROR] 掲示板接続失敗 ({target}): {e}")
         continue
 
     soup = BeautifulSoup(resp.text, "html.parser")
+    # 掲示板タイトルを取得（例：なんでも実況J）
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
+    
+    # ログにタイトルを表示 [修正箇所]
+    print(f"--- Checking board: {board_name} ({board_id}) ---")
     
     articles = soup.select("article.resentry")
     if not articles:
@@ -206,7 +212,7 @@ for target in url_list:
             continue
             
         if is_initial_run:
-            # 初回実行時はログのみ残してスキップ
+            # 初回実行時は記録のみ（通知なし）
             continue
 
         print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
@@ -236,7 +242,7 @@ for target in url_list:
 
     if newest_post_id > (last_post_id or 0):
         if is_initial_run:
-            print(f" [LOG] 初回実行のため、最新ID #{newest_post_id} を記録して終了します（通知なし）。")
+            print(f" [LOG] 初回実行のため、最新ID #{newest_post_id} を記録して終了します。")
         else:
             print(f" [LOG] 既読IDを #{newest_post_id} に更新します。")
         save_last_post_id(board_id, newest_post_id)
