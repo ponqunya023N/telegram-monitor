@@ -9,6 +9,10 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+# ===== 設定スイッチ =====
+# ログに掲示板タイトルを表示するかどうか (True: 表示 / False: IDのみ表示)
+LOG_WITH_TITLE = True 
+
 # ===== 定数・環境変数 =====
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -175,17 +179,18 @@ for target in url_list:
         resp = requests.get(target, headers=headers, timeout=15)
         resp.raise_for_status()
     except Exception as e:
-        # 接続失敗時はタイトルが取れないためIDを表示
         print(f"--- Checking board: {board_id} ---")
         print(f" [ERROR] 掲示板接続失敗 ({target}): {e}")
         continue
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    # 掲示板タイトルを取得（例：なんでも実況J）
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
     
-    # ログにタイトルを表示 [修正箇所]
-    print(f"--- Checking board: {board_name} ({board_id}) ---")
+    # スイッチに基づいてログ表示を切り替え
+    if LOG_WITH_TITLE:
+        print(f"--- Checking board: {board_name} ({board_id}) ---")
+    else:
+        print(f"--- Checking board: {board_id} ---")
     
     articles = soup.select("article.resentry")
     if not articles:
@@ -212,7 +217,6 @@ for target in url_list:
             continue
             
         if is_initial_run:
-            # 初回実行時は記録のみ（通知なし）
             continue
 
         print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
