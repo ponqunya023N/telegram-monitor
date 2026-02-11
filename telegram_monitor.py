@@ -89,7 +89,7 @@ def extract_urls(text: str):
 # ===== Telegram送信ロジック =====
 def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     """
-    メディアをグループとして送信し、直後にボタン付きメッセージを送る。
+    掲示板から抽出したIDに基づき、画像と動画の両方のURLを検証して送信する。
     """
     print(f"      [DEBUG] Telegramへ送信を試みます... (Media候補: {len(media_urls)})")
     
@@ -103,28 +103,28 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
         d_char = parsed.netloc.split('.')[0]
         base_netloc = parsed.netloc if d_char.startswith("cdn") else f"cdn{d_char}.5chan.jp"
 
-        # 拡張子判別をシンプルに修正 (元のURLを優先的に反映)
-        is_video = any(x in m_url.lower() for x in [".mp4", ".mov", ".webm", "video"])
+        # 総当たりで存在するURLを探す
+        attempts = [
+            {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.mp4"},
+            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.jpg"},
+            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.png"},
+            {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.gif"}
+        ]
         
-        if is_video:
-            media_type = "video"
-            target_download_url = f"https://{base_netloc}/file/{file_id}"
-            if not target_download_url.endswith(".mp4"): target_download_url += ".mp4"
-        else:
-            media_type = "photo"
-            target_download_url = f"https://{base_netloc}/file/plane/{file_id}"
-            if not target_download_url.endswith(".jpg"): target_download_url += ".jpg"
-
-        print(f"      [DEBUG] 試行URL: {target_download_url}")
-
-        try:
-            r = requests.head(target_download_url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                final_media_list.append({"type": media_type, "media": target_download_url})
-            else:
-                print(f"      [DEBUG] 存在確認失敗: {r.status_code}")
-        except Exception as e:
-            print(f"      [DEBUG] HEADエラー: {e}")
+        found_valid_media = False
+        for attempt in attempts:
+            try:
+                r = requests.head(attempt["url"], headers=headers, timeout=10)
+                if r.status_code == 200:
+                    print(f"      [DEBUG] 有効なメディアを確認: {attempt['url']}")
+                    final_media_list.append({"type": attempt["type"], "media": attempt["url"]})
+                    found_valid_media = True
+                    break
+            except:
+                continue
+        
+        if not found_valid_media:
+            print(f"      [DEBUG] ID {file_id} に対応するメディアが見つかりませんでした。")
 
     # テキストとボタンの準備
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
@@ -144,21 +144,19 @@ def send_telegram_media_group(board_name, board_id, post_id, posted_at, body_tex
 
     # 送信
     if not final_media_list:
-        print(f"      [DEBUG] 有効なメディアがありません。テキストのみ送信。")
+        print(f"      [DEBUG] 送信可能なメディアがないため、テキストのみ送信。")
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message_text, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)}
         requests.post(url, data=payload)
     else:
-        # メディアグループの送信
         group_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
-        # 最初の1枚にのみキャプションを付ける
         final_media_list[0]["caption"] = message_text
         final_media_list[0]["parse_mode"] = "HTML"
         
         resp_g = requests.post(group_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(final_media_list)})
-        print(f"      [DEBUG] sendMediaGroup status: {resp_g.status_code} {resp_g.text}")
+        print(f"      [DEBUG] sendMediaGroup status: {resp_g.status_code}")
         
-        # ボタン送信 (MediaGroupはボタン非対応のため)
+        # アルバムの下にボタン付きリンクを別途送信
         msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🔗 #{post_id} 直リンク", "reply_markup": json.dumps(keyboard)}
         requests.post(msg_url, data=payload)
