@@ -34,13 +34,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
         run: python telegram_monitor.py
-
-      - name: Commit and push if changed
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add last_post_id_*.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "Update last_post_id"
-            git push
-          fi
