@@ -70,6 +70,7 @@ def save_last_post_id(board_id: str, post_id: int):
     with open(fname, "w", encoding="utf-8") as f:
         f.write(str(post_id))
     
+    # GitHubリポジトリへの保存
     if os.environ.get("GITHUB_ACTIONS") == "true":
         try:
             subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
@@ -209,6 +210,7 @@ for target in url_list:
     last_post_id = load_last_post_id(board_id)
     newest_processed_id = last_post_id
 
+    # 記事を古い順に処理し、last_post_id より大きいものを全て検知する元のロジック
     for article in reversed(articles):
         eno_tag = article.select_one("span.eno a")
         if eno_tag is None: continue 
@@ -216,6 +218,7 @@ for target in url_list:
             post_id = int("".join(filter(str.isdigit, eno_tag.get_text(strip=True))))
         except Exception: continue
 
+        # 最後に送ったID以下のものはスキップ（これが正しい差分検知）
         if last_post_id is not None and post_id <= last_post_id:
             continue
         
