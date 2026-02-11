@@ -20,6 +20,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
+# 【追加】Cloudflareからの強制トリガー用環境変数
+TRIGGER_LATEST_ID = os.environ.get("TRIGGER_LATEST_ID")
+TRIGGER_BOARD_ID = os.environ.get("TRIGGER_BOARD_ID")
+
 # 必須チェック
 missing = []
 if not TELEGRAM_BOT_TOKEN: missing.append("TELEGRAM_BOT_TOKEN")
@@ -222,6 +226,14 @@ for target in url_list:
     last_post_id = load_last_post_id(board_id)
     newest_processed_id = last_post_id
 
+    # 【追加】Cloudflareから指定されたIDがあるか確認
+    forced_target_id = None
+    if TRIGGER_LATEST_ID and TRIGGER_BOARD_ID == board_id:
+        try:
+            forced_target_id = int(TRIGGER_LATEST_ID)
+            print(f" [INFO] Cloudflare指示によりID: {forced_target_id} を優先処理します。")
+        except: pass
+
     for article in reversed(articles):
         eno_tag = article.select_one("span.eno a")
         if eno_tag is None: continue 
@@ -230,8 +242,12 @@ for target in url_list:
         except Exception:
             continue
 
+        # 通常の重複チェック
         if last_post_id is not None and post_id <= last_post_id:
-            continue
+            # ただし、Cloudflareから「これを送れ」と指定されたIDだけは、重複していても通す（デバッグ用）
+            if post_id != forced_target_id:
+                continue
+        
         if post_id in sent_post_ids:
             continue
             
