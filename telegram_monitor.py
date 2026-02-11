@@ -147,11 +147,15 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             "reply_markup": json.dumps(keyboard)
         }
     else:
-        # メディアの種類に応じたメソッド
-        method = "sendVideo" if valid_media["type"] == "video" else "sendPhoto"
+        # 【修正箇所】sendVideo/sendPhotoではなくsendDocumentを使用
+        # URLの末尾にダミーパラメータを付与してTelegramのパースを助ける
+        method = "sendDocument"
+        suffix = ".mp4" if valid_media["type"] == "video" else ".jpg"
+        media_url_with_hint = f"{valid_media['url']}?f={suffix}"
+
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            valid_media["type"]: valid_media["url"],
+            "document": media_url_with_hint,
             "caption": caption_text,
             "parse_mode": "HTML",
             "reply_markup": json.dumps(keyboard)
