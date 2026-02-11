@@ -78,10 +78,17 @@ def extract_urls(text: str):
         parsed = urlparse(url)
         path = parsed.path.rstrip("/")
         last_segment = path.split("/")[-1] if "/" in path else ""
+        
+        # 投稿番号へのリンク（例: .../掲示板ID/391）を確実に除外する
+        if last_segment.isdigit():
+            # ただし disp などの特定のディレクトリを含む場合はメディア候補として残す
+            if "disp" not in url and "upup.be" not in url:
+                continue
+                
         if "disp" in url or "upup.be" in url:
             filtered_urls.append(url)
             continue
-        if last_segment.isdigit(): continue
+            
         filtered_urls.append(url)
     return filtered_urls
 
@@ -96,8 +103,17 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     for m_url in media_urls:
         parsed = urlparse(m_url)
         file_id = parsed.path.rstrip("/").split("/")[-1]
-        d_char = parsed.netloc.split('.')[0]
-        base_netloc = parsed.netloc if d_char.startswith("cdn") else f"cdn{d_char}.5chan.jp"
+        
+        # ドメインの動的判定 (cdnc, cdne, cdnf 等に対応)
+        netloc_parts = parsed.netloc.split('.')
+        d_char = netloc_parts[0]
+        
+        # cdnから始まるドメインならそのまま使い、そうでなければ補完する
+        if d_char.startswith("cdn"):
+            base_netloc = parsed.netloc
+        else:
+            # サンプルのように c, e 等の1文字の場合は cdnX.5chan.jp にする
+            base_netloc = f"cdn{d_char}.5chan.jp" if len(d_char) == 1 else parsed.netloc
 
         attempts = [
             {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.mp4", "file_id": file_id},
