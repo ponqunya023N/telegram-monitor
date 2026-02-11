@@ -3,7 +3,7 @@ import sys
 import re
 import time
 import json
-import io  # メモリ上でのデータ扱いに使用
+import io
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
-# 検証用：特定の掲示板と番号を強制的に狙い撃つ設定
+# 検証用：特定の掲示板と番号を強制的に狙い撃つ設定（テスト継続のため維持）
 DEBUG_TARGETS = {
     "2deSYWUkc5": 861,
     "tYEKGkE0Kj": 32
@@ -90,13 +90,13 @@ def extract_urls(text: str):
 # ===== Telegram送信ロジック =====
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     """
-    メディア(動画/画像)に本文とボタンを統合して1通で送信する。
+    メディア(動画/画像)ごとに、本文とボタンを統合して送信する。
     """
-    print(f"      [DEBUG] Telegramへ送信を試みます... (ID候補数: {len(media_urls)})")
+    print(f"      [DEBUG] 投稿#{post_id} のメディア解析中... (ID候補数: {len(media_urls)})")
     
-    valid_media = None
+    valid_media_list = []
     
-    # GitHubに負荷をかけない外部URL検証（総当たり）
+    # 候補URLから有効なメディア実体をすべて洗い出す
     for m_url in media_urls:
         parsed = urlparse(m_url)
         file_id = parsed.path.rstrip("/").split("/")[-1]
@@ -105,20 +105,19 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
 
         # 優先順位：1.動画(planeなし) 2.画像(planeあり)
         attempts = [
-            {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.mp4"},
-            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.jpg"},
-            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.png"}
+            {"type": "video", "url": f"https://{base_netloc}/file/{file_id}.mp4", "file_id": file_id},
+            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.jpg", "file_id": file_id},
+            {"type": "photo", "url": f"https://{base_netloc}/file/plane/{file_id}.png", "file_id": file_id}
         ]
         
         for attempt in attempts:
             try:
                 r = requests.head(attempt["url"], headers=headers, timeout=10)
                 if r.status_code == 200:
-                    valid_media = attempt
-                    print(f"      [DEBUG] 有効メディア特定: {valid_media['url']}")
+                    valid_media_list.append(attempt)
+                    print(f"      [DEBUG] 有効メディア特定: {attempt['url']}")
                     break
             except: continue
-        if valid_media: break
 
     # テキストとボタンの準備
     summary_text = body_text[:300] + ("..." if len(body_text) > 300 else "")
@@ -129,7 +128,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         f"{summary_text}"
     )
     
-    # ボタン名：「掲示板」「投稿」
     keyboard = {
         "inline_keyboard": [[
             {"text": "掲示板", "url": board_url},
@@ -137,32 +135,33 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         ]]
     }
 
-    # 1通にまとめて送信
-    if not valid_media:
+    # メディアがない場合はテキストのみ送信
+    if not valid_media_list:
         print(f"      [DEBUG] 有効メディアなし。テキストのみ送信。")
-        method = "sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": caption_text,
             "parse_mode": "HTML",
             "reply_markup": json.dumps(keyboard)
         }
-        resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload)
-    else:
-        # 【修正箇所】メモリ経由でのデータ中継
-        # GitHub Actions側でデータを一度取得し、保存せずにTelegramへ投函する
-        method = "sendVideo" if valid_media["type"] == "video" else "sendPhoto"
-        media_field = "video" if valid_media["type"] == "video" else "photo"
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data=payload)
+        return
+
+    # 見つかったすべてのメディアを個別に送信
+    for media in valid_media_list:
+        method = "sendVideo" if media["type"] == "video" else "sendPhoto"
+        media_field = "video" if media["type"] == "video" else "photo"
         
+        # 命名規則: [mov]ID.mp4 または [pic]ID.jpg
+        prefix = "[mov]" if media["type"] == "video" else "[pic]"
+        suffix = ".mp4" if media["type"] == "video" else ".jpg"
+        fname = f"{prefix}{media['file_id']}{suffix}"
+
         try:
-            # 5chanからデータをメモリに読み込む
-            media_resp = requests.get(valid_media["url"], headers=headers, timeout=20)
+            # メモリ中継（ディスクに保存せず直接転送）
+            media_resp = requests.get(media["url"], headers=headers, timeout=20)
             media_resp.raise_for_status()
-            
-            # ディスクには保存せず、BytesIO（メモリ上の仮想ファイル）として扱う
             media_file = io.BytesIO(media_resp.content)
-            # ファイル名はTelegramが拡張子を判断するために付与
-            fname = "video.mp4" if valid_media["type"] == "video" else "image.jpg"
             
             payload = {
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -173,14 +172,12 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             files = {media_field: (fname, media_file)}
             
             resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", data=payload, files=files)
+            if resp.status_code == 200:
+                print(f"      [SUCCESS] メディア送信完了: {fname}")
+            else:
+                print(f"      [ERROR] Telegram送信失敗: {resp.status_code} {resp.text}")
         except Exception as e:
-            print(f"      [ERROR] メモリ中継失敗: {e}")
-            return
-
-    if resp.status_code == 200:
-        print(f"      [SUCCESS] 投稿#{post_id} 送信完了。")
-    else:
-        print(f"      [ERROR] Telegram送信失敗: {resp.status_code} {resp.text}")
+            print(f"      [ERROR] 送信プロセスエラー ({fname}): {e}")
 
 # ===== メイン処理 =====
 for target in url_list:
@@ -202,7 +199,8 @@ for target in url_list:
     last_post_id = load_last_post_id(board_id)
     newest_post_id = last_post_id if last_post_id else 0
     
-    for article in articles:
+    # 掲示板の下から上（古い方から新しい方）へ処理
+    for article in reversed(articles):
         eno_tag = article.select_one("span.eno a")
         if eno_tag is None: continue 
         try:
@@ -226,6 +224,7 @@ for target in url_list:
         comment_div = article.select_one("div.comment")
         body_text = comment_div.get_text("\n", strip=True) if comment_div else ""
 
+        # メディアURL抽出
         media_urls = []
         urls_in_body = extract_urls(body_text)
         for u in urls_in_body:
@@ -242,8 +241,12 @@ for target in url_list:
         target_post_url = f"{base_target}/{post_id}"
         board_url = base_target + "/"
         
+        unique_media = list(dict.fromkeys(media_urls))
         send_telegram_combined(
             board_name, board_id, post_id, posted_at, body_text, 
-            board_url, target_post_url, list(dict.fromkeys(media_urls))
+            board_url, target_post_url, unique_media
         )
         sent_post_ids.add(post_id)
+
+    # 最後に既読IDを更新（狙い撃ちデバッグ中は更新しない方が何度も試せます）
+    # save_last_post_id(board_id, newest_post_id)
