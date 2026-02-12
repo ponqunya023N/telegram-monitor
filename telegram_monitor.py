@@ -60,28 +60,21 @@ def commit_and_push_all():
     
     if os.environ.get("GITHUB_ACTIONS") == "true":
         try:
-            # git設定
             subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
             subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
-            
-            # 変更のあったファイルをステージング
             for f in updated_files:
                 subprocess.run(["git", "add", f], check=True)
             
-            # 実際に差分がある場合のみプッシュ
             status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
             if status.stdout.strip():
                 subprocess.run(["git", "commit", "-m", "update multiple last_ids"], check=True)
-                # rebaseして競合を回避しやすくする
                 subprocess.run(["git", "pull", "--rebase"], check=False)
                 subprocess.run(["git", "push"], check=True)
                 print(f" [LOG] {len(updated_files)}件のIDファイルをプッシュしました。")
-            else:
-                print(" [LOG] 差分が検出されなかったためプッシュをスキップします。")
         except Exception as e:
             print(f" [ERROR] Push failed: {e}")
 
-# ===== 送信ロジック・ユーティリティ (略さず全文維持) =====
+# ===== 送信ロジック・ユーティリティ =====
 def extract_urls(text: str):
     found = URL_PATTERN.findall(text)
     unique_urls = sorted(list(set(found)))
@@ -97,14 +90,21 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     valid_media_list = []
     for m_url in media_urls:
         parsed = urlparse(m_url)
-        file_id = parsed.path.rstrip("/").split("/")[-1]
-        netloc = parsed.netloc if parsed.netloc.startswith("cdn") else f"cdn{parsed.netloc.split('.')[0]}.5chan.jp"
+        # 拡張子を除いたファイルIDを抽出
+        raw_file_id = parsed.path.rstrip("/").split("/")[-1]
+        file_id = os.path.splitext(raw_file_id)[0] 
+        
+        # サブドメインの決定 (c.5chan.jp -> cdnc.5chan.jp)
+        netloc = parsed.netloc
+        if not netloc.startswith("cdn"):
+            subdomain = netloc.split('.')[0]
+            netloc = f"cdn{subdomain}.5chan.jp"
+
         for attempt in [
-            {"type": "video", "url": f"https://{netloc}/file/{file_id}.mp4", "file_id": file_id},
-            {"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.jpg", "file_id": file_id}
+            {"type": "video", "url": f"https://{netloc}/file/{file_id}.mp4", "ext": "mp4"},
+            {"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.jpg", "ext": "jpg"}
         ]:
             try:
-                # stream=Trueを使用してヘッダーのみチェックし高速化
                 if requests.get(attempt["url"], headers=headers, stream=True, timeout=10).status_code == 200:
                     valid_media_list.append(attempt)
                     break
@@ -118,10 +118,14 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
         try:
-            res = requests.post(
+            # 確実に送信するため、ファイル名を指定して送信
+            file_content = requests.get(media["url"], headers=headers).content
+            files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_content)}
+            
+            requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
                 data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
-                files={("video" if media["type"] == "video" else "photo"): requests.get(media["url"], headers=headers).content}
+                files=files
             )
         except: pass
 
@@ -140,7 +144,6 @@ for target in url_list:
     last_id = load_last_post_id(board_id)
     new_last_id = last_id
 
-    # 記事は新しい順に並んでいることが多いため、古い順（昇順）に処理するためにreverseする
     for article in reversed(articles):
         try:
             eno_text = article.select_one("span.eno a").get_text(strip=True)
@@ -150,8 +153,6 @@ for target in url_list:
         if last_id is not None and post_id <= last_id: continue
         if post_id in sent_post_ids: continue
         
-        # 初回実行時（last_idがない場合）は通知せず、現在の最新IDを記録するだけに留める
-        # ※必要に応じてここを通知するように変更可能
         if last_id is None:
             new_last_id = max(new_last_id or 0, post_id)
             continue
@@ -160,19 +161,20 @@ for target in url_list:
         posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
         body_text = article.select_one("div.comment").get_text("\n", strip=True) if article.select_one("div.comment") else ""
         
+        # メディアURLの収集
         media_urls = [urljoin(target, a["href"]) for a in article.select(".filethumblist li a[href]")]
         for u in extract_urls(body_text):
-            if "disp" in u or "upup.be" in u: media_urls.append(u)
+            # disp形式、upup.be、または直接的な動画/画像拡張子を持つURLを対象にする
+            if any(ext in u.lower() for ext in ["disp", "upup.be", ".mp4", ".webm", ".jpg", ".jpeg", ".png", ".gif"]):
+                media_urls.append(u)
 
         send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
         sent_post_ids.add(post_id)
         new_last_id = max(new_last_id or 0, post_id)
 
-    # ループ終了後にローカルファイルを更新
     if new_last_id and new_last_id != last_id:
         save_last_post_id_local(board_id, new_last_id)
     else:
         print(" [LOG] 新着なし")
 
-# 全てのボードの処理が終わったら、最後に1回だけプッシュ
 commit_and_push_all()
