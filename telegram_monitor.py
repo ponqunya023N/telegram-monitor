@@ -80,6 +80,7 @@ def extract_urls(text: str):
     unique_urls = sorted(list(set(found)))
     filtered_urls = []
     anchor_regex = re.compile(r'/[a-zA-Z0-9]+/\d+$')
+    
     for url in unique_urls:
         if anchor_regex.search(url) and "disp" not in url and "upup.be" not in url: continue
         filtered_urls.append(url)
@@ -90,20 +91,24 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     valid_media_list = []
     for m_url in media_urls:
         parsed = urlparse(m_url)
-        # 拡張子を除いたファイルIDを抽出
         raw_file_id = parsed.path.rstrip("/").split("/")[-1]
         file_id = os.path.splitext(raw_file_id)[0] 
         
-        # サブドメインの決定 (c.5chan.jp -> cdnc.5chan.jp)
         netloc = parsed.netloc
         if not netloc.startswith("cdn"):
             subdomain = netloc.split('.')[0]
             netloc = f"cdn{subdomain}.5chan.jp"
 
-        for attempt in [
-            {"type": "video", "url": f"https://{netloc}/file/{file_id}.mp4", "ext": "mp4"},
-            {"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.jpg", "ext": "jpg"}
-        ]:
+        # 試行候補リストを生成（指定された拡張子に基づく）
+        candidates = []
+        # 動画：mp4, mpg, mov, webm, gif, wmv
+        for ext in ["mp4", "mpg", "mov", "webm", "gif", "wmv"]:
+            candidates.append({"type": "video", "url": f"https://{netloc}/file/{file_id}.{ext}", "ext": ext})
+        # 画像：jpg, jpeg, png, bmp
+        for ext in ["jpg", "jpeg", "png", "bmp"]:
+            candidates.append({"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.{ext}", "ext": ext})
+
+        for attempt in candidates:
             try:
                 if requests.get(attempt["url"], headers=headers, stream=True, timeout=10).status_code == 200:
                     valid_media_list.append(attempt)
@@ -118,7 +123,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
         try:
-            # 確実に送信するため、ファイル名を指定して送信
             file_content = requests.get(media["url"], headers=headers).content
             files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_content)}
             
@@ -161,11 +165,13 @@ for target in url_list:
         posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
         body_text = article.select_one("div.comment").get_text("\n", strip=True) if article.select_one("div.comment") else ""
         
-        # メディアURLの収集
         media_urls = [urljoin(target, a["href"]) for a in article.select(".filethumblist li a[href]")]
+        
+        # 検知対象の拡張子（指定リスト）
+        target_extensions = ["disp", "upup.be", ".mp4", ".mpg", ".mov", ".webm", ".gif", ".wmv", ".jpg", ".jpeg", ".png", ".bmp"]
+        
         for u in extract_urls(body_text):
-            # disp形式、upup.be、または直接的な動画/画像拡張子を持つURLを対象にする
-            if any(ext in u.lower() for ext in ["disp", "upup.be", ".mp4", ".webm", ".jpg", ".jpeg", ".png", ".gif"]):
+            if any(ext in u.lower() for ext in target_extensions):
                 media_urls.append(u)
 
         send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
