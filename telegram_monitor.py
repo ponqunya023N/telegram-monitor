@@ -79,27 +79,59 @@ def extract_urls(text: str):
     found = URL_PATTERN.findall(text)
     unique_urls = sorted(list(set(found)))
     filtered_urls = []
-    anchor_regex = re.compile(r'/[a-zA-Z0-9]+/\d+$')
     
     for url in unique_urls:
-        if anchor_regex.search(url) and "disp" not in url and "upup.be" not in url: continue
+        # 5chの内部リンク（read.cgiを含むもの）を除外
+        if "/read.cgi/" in url:
+            continue
         filtered_urls.append(url)
     return filtered_urls
+
+def resolve_external_media(url):
+    """upup.beやimgef.comなどの外部ページから動画URLを抽出する"""
+    if "upup.be" in url or "imgef.com" in url:
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, "html.parser")
+                # videoタグまたはsourceタグを探す
+                video_tag = soup.find("video")
+                if video_tag:
+                    src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
+                    if src:
+                        full_url = urljoin(url, src)
+                        ext = full_url.split(".")[-1].split("?")[0]
+                        return {"type": "video", "url": full_url, "ext": ext}
+                # aタグの直リンクを探す(imgef等のパターン)
+                for a in soup.find_all("a", href=True):
+                    if ".mov" in a["href"].lower() or ".mp4" in a["href"].lower():
+                        full_url = urljoin(url, a["href"])
+                        ext = full_url.split(".")[-1].split("?")[0]
+                        return {"type": "video", "url": full_url, "ext": ext}
+        except: pass
+    return None
 
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     print(f"      [LOG] 投稿#{post_id} のメディア解析開始")
     valid_media_list = []
+    
     for m_url in media_urls:
+        # 外部サイト(upup.be等)の解析を試行
+        external = resolve_external_media(m_url)
+        if external:
+            valid_media_list.append(external)
+            continue
+
+        # 既存の5ch cdnロジック
         parsed = urlparse(m_url)
         raw_file_id = parsed.path.rstrip("/").split("/")[-1]
         file_id = os.path.splitext(raw_file_id)[0] 
         
         netloc = parsed.netloc
-        if not netloc.startswith("cdn"):
+        if not netloc.startswith("cdn") and ".5chan.jp" in netloc:
             subdomain = netloc.split('.')[0]
             netloc = f"cdn{subdomain}.5chan.jp"
 
-        # 試行候補リストを生成（指定された拡張子に基づく）
         candidates = []
         # 動画：mp4, mpg, mov, webm, gif, wmv
         for ext in ["mp4", "mpg", "mov", "webm", "gif", "wmv"]:
@@ -110,27 +142,34 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
 
         for attempt in candidates:
             try:
-                if requests.get(attempt["url"], headers=headers, stream=True, timeout=10).status_code == 200:
+                if requests.get(attempt["url"], headers=headers, stream=True, timeout=5).status_code == 200:
                     valid_media_list.append(attempt)
                     break
             except: continue
 
-    if not valid_media_list: return
-
-    caption = f"<b>【{board_name}】</b>\n#{post_id} | {posted_at}\n\n{body_text[:300]}"
+    caption = f"<b>【{board_name}】</b>\n#{post_id} | {posted_at}\n\n{body_text[:400]}"
     keyboard = {"inline_keyboard": [[{"text": "掲示板", "url": board_url}, {"text": "投稿", "url": target_post_url}]]}
 
+    if not valid_media_list:
+        # メディアが見つからないが、URLは存在する場合（テキストのみ送信）
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)}
+        )
+        return
+
+    # メディアがある場合
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
         try:
-            file_content = requests.get(media["url"], headers=headers).content
-            files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_content)}
-            
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
-                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
-                files=files
-            )
+            file_res = requests.get(media["url"], headers=headers, timeout=20)
+            if file_res.status_code == 200:
+                files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_res.content)}
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+                    data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
+                    files=files
+                )
         except: pass
 
 # ===== メインループ =====
@@ -165,17 +204,18 @@ for target in url_list:
         posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
         body_text = article.select_one("div.comment").get_text("\n", strip=True) if article.select_one("div.comment") else ""
         
+        # 添付メディア
         media_urls = [urljoin(target, a["href"]) for a in article.select(".filethumblist li a[href]")]
         
-        # 検知対象の拡張子（指定リスト）
-        target_extensions = ["disp", "upup.be", ".mp4", ".mpg", ".mov", ".webm", ".gif", ".wmv", ".jpg", ".jpeg", ".png", ".bmp"]
+        # 本文内のURLを抽出（5ch内部リンクは除外済み）
+        extracted = extract_urls(body_text)
         
-        for u in extract_urls(body_text):
-            if any(ext in u.lower() for ext in target_extensions):
-                media_urls.append(u)
-
-        send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
-        sent_post_ids.add(post_id)
+        # 抽出されたURLがある、または添付メディアがある場合のみ通知
+        if extracted or media_urls:
+            media_urls.extend(extracted)
+            send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
+            sent_post_ids.add(post_id)
+        
         new_last_id = max(new_last_id or 0, post_id)
 
     if new_last_id and new_last_id != last_id:
