@@ -32,8 +32,11 @@ updated_files = []
 
 # ===== 状態管理 =====
 def get_board_id(url: str) -> str:
-    path = urlparse(url).path.rstrip("/")
-    return path.split("/")[-1] if path else "default"
+    """URL全体から一意のファイル名用IDを生成する"""
+    # https:// を除去し、記号をアンダースコアに置換
+    safe_id = re.sub(r'https?://', '', url)
+    safe_id = re.sub(r'[\/:?=&]', '_', safe_id)
+    return safe_id
 
 def load_last_post_id(board_id: str):
     fname = f"last_post_id_{board_id}.txt"
@@ -81,7 +84,6 @@ def extract_urls(text: str):
     filtered_urls = []
     
     for url in unique_urls:
-        # 5chの内部リンク（read.cgiを含むもの）を除外
         if "/read.cgi/" in url:
             continue
         filtered_urls.append(url)
@@ -94,7 +96,6 @@ def resolve_external_media(url):
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
-                # videoタグまたはsourceタグを探す
                 video_tag = soup.find("video")
                 if video_tag:
                     src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
@@ -102,7 +103,6 @@ def resolve_external_media(url):
                         full_url = urljoin(url, src)
                         ext = full_url.split(".")[-1].split("?")[0]
                         return {"type": "video", "url": full_url, "ext": ext}
-                # aタグの直リンクを探す(imgef等のパターン)
                 for a in soup.find_all("a", href=True):
                     if ".mov" in a["href"].lower() or ".mp4" in a["href"].lower():
                         full_url = urljoin(url, a["href"])
@@ -116,13 +116,11 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     valid_media_list = []
     
     for m_url in media_urls:
-        # 外部サイト(upup.be等)の解析を試行
         external = resolve_external_media(m_url)
         if external:
             valid_media_list.append(external)
             continue
 
-        # 既存の5ch cdnロジック
         parsed = urlparse(m_url)
         raw_file_id = parsed.path.rstrip("/").split("/")[-1]
         file_id = os.path.splitext(raw_file_id)[0] 
@@ -133,10 +131,8 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             netloc = f"cdn{subdomain}.5chan.jp"
 
         candidates = []
-        # 動画：mp4, mpg, mov, webm, gif, wmv
         for ext in ["mp4", "mpg", "mov", "webm", "gif", "wmv"]:
             candidates.append({"type": "video", "url": f"https://{netloc}/file/{file_id}.{ext}", "ext": ext})
-        # 画像：jpg, jpeg, png, bmp
         for ext in ["jpg", "jpeg", "png", "bmp"]:
             candidates.append({"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.{ext}", "ext": ext})
 
@@ -151,14 +147,12 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     keyboard = {"inline_keyboard": [[{"text": "掲示板", "url": board_url}, {"text": "投稿", "url": target_post_url}]]}
 
     if not valid_media_list:
-        # メディアが見つからないが、URLは存在する場合（テキストのみ送信）
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID, "text": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)}
         )
         return
 
-    # メディアがある場合
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
         try:
@@ -204,13 +198,9 @@ for target in url_list:
         posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
         body_text = article.select_one("div.comment").get_text("\n", strip=True) if article.select_one("div.comment") else ""
         
-        # 添付メディア
         media_urls = [urljoin(target, a["href"]) for a in article.select(".filethumblist li a[href]")]
-        
-        # 本文内のURLを抽出（5ch内部リンクは除外済み）
         extracted = extract_urls(body_text)
         
-        # 抽出されたURLがある、または添付メディアがある場合のみ通知
         if extracted or media_urls:
             media_urls.extend(extracted)
             send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
