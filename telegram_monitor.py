@@ -5,6 +5,7 @@ import time
 import json
 import io
 import subprocess
+import hashlib # 【追加】URLを暗号化（ハッシュ化）するための機能を読み込みます
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -31,12 +32,24 @@ URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
 updated_files = []
 
 # ===== 状態管理 =====
-def get_board_id(url: str) -> str:
-    """URL全体から一意のファイル名用IDを生成する"""
-    # https:// を除去し、記号をアンダースコアに置換
-    safe_id = re.sub(r'https?://', '', url)
-    safe_id = re.sub(r'[\/:?=&]', '_', safe_id)
-    return safe_id
+
+# --- 変更前元のコード（極力残すルールに則りコメントアウト） ---
+# def get_board_id(url: str) -> str:
+#     """URL全体から一意のファイル名用IDを生成する"""
+#     # https:// を除去し、記号をアンダースコアに置換
+#     safe_id = re.sub(r'https?://', '', url)
+#     safe_id = re.sub(r'[\/:?=&]', '_', safe_id)
+#     return safe_id
+# -------------------------------------------------------------
+
+# --- 変更後：順番の番号とハッシュ化（暗号化）による匿名化ID生成 ---
+def get_board_id(url: str, index: int) -> str:
+    """URLから人間には解読できないハッシュ値を生成し、順番の番号を付与します"""
+    # URLを不可逆の文字列（ハッシュ）に変換します
+    url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()[:12] # 先頭12文字だけ使用
+    # "01_a1b2c3d4e5f6" のような形式で返します（indexは1からスタートします）
+    return f"{index:02d}_{url_hash}"
+# -------------------------------------------------------------
 
 # --- 変更前元のコード（極力残すルールに則りコメントアウト） ---
 # def load_last_post_id(board_id: str):
@@ -58,7 +71,6 @@ def load_last_post_ids(board_id: str):
         with open(fname, "r", encoding="utf-8") as f:
             content = f.read().strip()
             if not content: return []
-            # カンマ区切りでリスト化。古い形式(単一の数字)のtxtファイルにもそのまま対応できます
             return [int(x) for x in content.split(",") if x.strip().isdigit()]
     except: return []
 # -------------------------------------------------------------
@@ -78,7 +90,6 @@ def save_last_post_ids_local(board_id: str, post_ids: list):
     """今回通知した複数の投稿番号をカンマ区切りのリスト形式で保存します"""
     fname = f"last_post_id_{board_id}.txt"
     with open(fname, "w", encoding="utf-8") as f:
-        # リストの中身をカンマ(,)で繋いでtxtに書き込みます
         f.write(",".join(map(str, sorted(post_ids))))
     if fname not in updated_files:
         updated_files.append(fname)
@@ -196,14 +207,24 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         except: pass
 
 # ===== メインループ =====
-for target in url_list:
-    board_id = get_board_id(target)
+
+# --- 変更前 ---
+# for target in url_list:
+#     board_id = get_board_id(target)
+# -------------
+
+# --- 変更後：URLの順番（1番目、2番目...）を取得できるように enumerate を使用 ---
+for i, target in enumerate(url_list, start=1):
+    board_id = get_board_id(target, i) # 順番の番号(i)を関数に渡します
+# -------------------------------------------------------------------------
+
     try:
         resp = requests.get(target, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
     except: continue
 
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
+    # URL自体はログに出力せず、暗号化されたID（01_xxx...）だけを出力して秘匿します
     print(f"--- Checking board: {board_id} ---")
     
     articles = soup.select("article.resentry")
@@ -217,7 +238,6 @@ for target in url_list:
     last_ids_list = load_last_post_ids(board_id)
     max_last_id = max(last_ids_list) if last_ids_list else None
     
-    # 今回の処理で新たに通知対象となった投稿番号だけを入れる空のリストを準備します
     current_batch_ids = []
     # -------------------------------------------------------
 
@@ -231,8 +251,7 @@ for target in url_list:
         # if last_id is not None and post_id <= last_id: continue
         # -------------
         
-        # --- 変更後：あなたの案に基づく二重の重複防止チェック ---
-        # 過去の最大ID以下の古い投稿、または「前回のリスト」にすでに含まれている場合はスキップします
+        # --- 変更後：過去の最大ID以下、または前回のリストに含まれる場合はスキップ ---
         if max_last_id is not None and post_id <= max_last_id: continue
         if post_id in last_ids_list: continue
         # ------------------------------------------------------
@@ -245,9 +264,8 @@ for target in url_list:
         #     continue
         # -------------
         
-        # --- 変更後：初回実行時の処理 ---
+        # --- 変更後：初回は通知せずに投稿番号だけ控える ---
         if max_last_id is None:
-            # 初回は通知せずに投稿番号だけをリストに控えておきます
             current_batch_ids.append(post_id)
             continue
         # --------------------------------
@@ -268,7 +286,7 @@ for target in url_list:
         # new_last_id = max(new_last_id or 0, post_id)
         # -------------
         
-        # --- 変更後：通知した投稿番号をリストに追加して控えておく ---
+        # --- 変更後：通知した投稿番号をリストに追加 ---
         current_batch_ids.append(post_id)
         # ------------------------------------------------------
 
@@ -279,12 +297,10 @@ for target in url_list:
     #     print(" [LOG] 新着なし")
     # -------------
     
-    # --- 変更後：あなたの「リストに変化があった時のみ保存する」というルールの実装 ---
+    # --- 変更後：リストに変化があった時のみ保存 ---
     if current_batch_ids:
-        # 新しく通知したもの（または初回読み込み分）があれば、そのリストを保存します
         save_last_post_ids_local(board_id, current_batch_ids)
     else:
-        # 新着が全くない場合はリストを上書きせず、何もしません（あなたの案の通りです）
         print(" [LOG] 新着なし")
     # --------------------------------------------------------------------------
 
