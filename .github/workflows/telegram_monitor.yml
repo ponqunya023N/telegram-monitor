@@ -5,6 +5,13 @@ on:
     types: [trigger_monitor, board_updated]
   workflow_dispatch:
 
+# --- ここから追加：あなたのリスト照合案をさらに確実にするための「同時実行防止（二重ロック）」 ---
+# 今誰かが実行中であれば、次の処理はそれが終わるまで順番待ちをします
+concurrency:
+  group: telegram-monitor-group
+  cancel-in-progress: false
+# --- 追加ここまで ---
+
 # ここで明示的にリポジトリへの書き込み権限を許可します
 permissions:
   contents: write
@@ -34,5 +41,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
         run: python telegram_monitor.py
-      
-      # Commit and pushステップはPythonスクリプト内に統合したため削除
