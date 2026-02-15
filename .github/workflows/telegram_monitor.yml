@@ -1,16 +1,22 @@
 name: Telegram Monitor
 
 on:
-  repository_dispatch:
-    types: [trigger_monitor, board_updated]
-  workflow_dispatch:
+# --- 変更前元のコード（不要なスケジュールなどの記載部分をコメントアウト） ---
+#  repository_dispatch:
+#    types: [trigger_monitor, board_updated]
+#  workflow_dispatch:
+# ---------------------------------------------------------------------
 
-# --- ここから追加：あなたのリスト照合案をさらに確実にするための「同時実行防止（二重ロック）」 ---
+# --- 変更後：Cloudflareからの合図を受け付けて起動する設定 ---
+  repository_dispatch:
+    types: [trigger_monitor]  # Cloudflareからはこの名前で合図が送られてきます
+  workflow_dispatch:          # 手動でテスト実行したい時のためのボタンです
+# --------------------------------------------------------
+
 # 今誰かが実行中であれば、次の処理はそれが終わるまで順番待ちをします
 concurrency:
   group: telegram-monitor-group
   cancel-in-progress: false
-# --- 追加ここまで ---
 
 # ここで明示的にリポジトリへの書き込み権限を許可します
 permissions:
