@@ -5,7 +5,7 @@ import time
 import json
 import io
 import subprocess
-import hashlib # 【追加】URLを暗号化（ハッシュ化）するための機能を読み込みます
+import hashlib # 追加：URLをハッシュ化するための標準ライブラリ
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -32,68 +32,78 @@ URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
 updated_files = []
 
 # ===== 状態管理 =====
-
-# --- 変更前元のコード（極力残すルールに則りコメントアウト） ---
+# --- 変更前元のコード ---
 # def get_board_id(url: str) -> str:
 #     """URL全体から一意のファイル名用IDを生成する"""
-#     # https:// を除去し、記号をアンダースコアに置換
 #     safe_id = re.sub(r'https?://', '', url)
 #     safe_id = re.sub(r'[\/:?=&]', '_', safe_id)
 #     return safe_id
-# -------------------------------------------------------------
+# -----------------------
 
-# --- 変更後：順番の番号とハッシュ化（暗号化）による匿名化ID生成 ---
+# --- 変更後：URLを完全に秘匿化したハッシュ文字列に変換し、連番を付ける ---
 def get_board_id(url: str, index: int) -> str:
-    """URLから人間には解読できないハッシュ値を生成し、順番の番号を付与します"""
-    # URLを不可逆の文字列（ハッシュ）に変換します
-    url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()[:12] # 先頭12文字だけ使用
-    # "01_a1b2c3d4e5f6" のような形式で返します（indexは1からスタートします）
-    return f"{index:02d}_{url_hash}"
-# -------------------------------------------------------------
+    """URLを解読不可のハッシュにし、Secretsの順番(index)を先頭に付与します"""
+    hashed = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
+    return f"{index:02d}_{hashed}"
+# -----------------------------------------------------------------
 
-# --- 変更前元のコード（極力残すルールに則りコメントアウト） ---
-# def load_last_post_id(board_id: str):
+
+# --- 変更前元のコード ---
+# def load_last_post_ids(board_id: str):
+#     """txtファイルから前回の投稿番号のリストを読み込みます"""
 #     fname = f"last_post_id_{board_id}.txt"
-#     if not os.path.exists(fname): return None
+#     if not os.path.exists(fname): return []
 #     try:
 #         with open(fname, "r", encoding="utf-8") as f:
 #             content = f.read().strip()
-#             return int(content) if content else None
-#     except: return None
-# -------------------------------------------------------------
+#             if not content: return []
+#             return [int(x) for x in content.split(",") if x.strip().isdigit()]
+#     except: return []
+# -----------------------
 
-# --- 変更後：あなたの案を採用し、IDのリストを読み込むように修正 ---
-def load_last_post_ids(board_id: str):
-    """txtファイルから前回の投稿番号のリストを読み込みます"""
+# --- 変更後：A（最大番号）とB（通知リスト）を2行で分けて管理するように修正 ---
+def load_last_post_ids_ab(board_id: str):
+    """txtファイルから1行目(A:最大番号)と2行目(B:リスト)を読み込みます"""
     fname = f"last_post_id_{board_id}.txt"
-    if not os.path.exists(fname): return []
+    if not os.path.exists(fname): return None, []
     try:
         with open(fname, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-            if not content: return []
-            return [int(x) for x in content.split(",") if x.strip().isdigit()]
-    except: return []
+            lines = f.read().strip().splitlines()
+            if not lines: return None, []
+            
+            # 1行目：A (最大番号)
+            max_id = int(lines[0]) if lines[0].strip().isdigit() else None
+            
+            # 2行目：B (前回通知した番号のリスト)
+            id_list = []
+            if len(lines) > 1:
+                id_list = [int(x) for x in lines[1].split(",") if x.strip().isdigit()]
+            return max_id, id_list
+    except: return None, []
 # -------------------------------------------------------------
 
+
 # --- 変更前元のコード ---
-# def save_last_post_id_local(board_id: str, post_id: int):
-#     """ローカルファイルのみ更新し、更新ファイルリストに追加"""
+# def save_last_post_ids_local(board_id: str, post_ids: list):
+#     """今回通知した複数の投稿番号をカンマ区切りのリスト形式で保存します"""
 #     fname = f"last_post_id_{board_id}.txt"
 #     with open(fname, "w", encoding="utf-8") as f:
-#         f.write(str(post_id))
+#         f.write(",".join(map(str, sorted(post_ids))))
 #     if fname not in updated_files:
 #         updated_files.append(fname)
 # -----------------------
 
-# --- 変更後：通知したIDのリストをカンマ区切りで保存するように修正 ---
-def save_last_post_ids_local(board_id: str, post_ids: list):
-    """今回通知した複数の投稿番号をカンマ区切りのリスト形式で保存します"""
+# --- 変更後：AとBを分けて保存するように修正（テストでの手動変更をしやすくするため） ---
+def save_last_post_ids_local_ab(board_id: str, max_id: int, post_ids: list):
+    """1行目に最大番号(A)、2行目に通知リスト(B)を保存します"""
     fname = f"last_post_id_{board_id}.txt"
     with open(fname, "w", encoding="utf-8") as f:
+        f.write(f"{max_id}\n")
         f.write(",".join(map(str, sorted(post_ids))))
     if fname not in updated_files:
         updated_files.append(fname)
-# -------------------------------------------------------------
+# --------------------------------------------------------------------------------
+
 
 def commit_and_push_all():
     """全処理の最後に1回だけまとめてプッシュ"""
@@ -207,37 +217,40 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         except: pass
 
 # ===== メインループ =====
-
 # --- 変更前 ---
 # for target in url_list:
 #     board_id = get_board_id(target)
-# -------------
-
-# --- 変更後：URLの順番（1番目、2番目...）を取得できるように enumerate を使用 ---
-for i, target in enumerate(url_list, start=1):
-    board_id = get_board_id(target, i) # 順番の番号(i)を関数に渡します
-# -------------------------------------------------------------------------
+# --- 変更後：順番(index)を1から数えて一緒に取得する ---
+for index, target in enumerate(url_list, start=1):
+    board_id = get_board_id(target, index)
+# ------------------------------------------------
 
     try:
         resp = requests.get(target, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
-    except: continue
+    # --- 変更前 ---
+    # except: continue
+    # --- 変更後：エラー時にURLを出さずログを隠蔽 ---
+    except Exception as e: 
+        print(f" [ERROR] 掲示板 {board_id} の取得に失敗しました。（URLは秘匿されています）")
+        continue
+    # ---------------------------------------------
 
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
-    # URL自体はログに出力せず、暗号化されたID（01_xxx...）だけを出力して秘匿します
     print(f"--- Checking board: {board_id} ---")
     
     articles = soup.select("article.resentry")
     
     # --- 変更前 ---
-    # last_id = load_last_post_id(board_id)
-    # new_last_id = last_id
+    # last_ids_list = load_last_post_ids(board_id)
+    # max_last_id = max(last_ids_list) if last_ids_list else None
+    # current_batch_ids = []
     # -------------
     
-    # --- 変更後：リストを取得し、その中の最大値も把握しておく ---
-    last_ids_list = load_last_post_ids(board_id)
-    max_last_id = max(last_ids_list) if last_ids_list else None
-    
+    # --- 変更後：A（最大番号）とB（リスト）を別々に読み込み ---
+    saved_max_id, last_ids_list = load_last_post_ids_ab(board_id)
+    # 処理中の新しい最大値を記録する変数
+    new_max_id = saved_max_id
     current_batch_ids = []
     # -------------------------------------------------------
 
@@ -246,27 +259,30 @@ for i, target in enumerate(url_list, start=1):
             eno_text = article.select_one("span.eno a").get_text(strip=True)
             post_id = int(re.search(r'\d+', eno_text).group())
         except: continue
-
+        
         # --- 変更前 ---
-        # if last_id is not None and post_id <= last_id: continue
+        # if max_last_id is not None and post_id <= max_last_id: continue
+        # if post_id in last_ids_list: continue
         # -------------
         
-        # --- 変更後：過去の最大ID以下、または前回のリストに含まれる場合はスキップ ---
-        if max_last_id is not None and post_id <= max_last_id: continue
+        # --- 変更後：A（saved_max_id）とB（last_ids_list）を使ったチェック ---
+        # テストで1行目のAを手動で下げた場合、ここをすり抜けて通知テストが行われます
+        if saved_max_id is not None and post_id <= saved_max_id: continue
         if post_id in last_ids_list: continue
         # ------------------------------------------------------
 
         if post_id in sent_post_ids: continue
         
         # --- 変更前 ---
-        # if last_id is None:
-        #     new_last_id = max(new_last_id or 0, post_id)
+        # if max_last_id is None:
+        #     current_batch_ids.append(post_id)
         #     continue
         # -------------
         
-        # --- 変更後：初回は通知せずに投稿番号だけ控える ---
-        if max_last_id is None:
+        # --- 変更後：初回実行時の処理（最大値を記録する処理を追加） ---
+        if saved_max_id is None:
             current_batch_ids.append(post_id)
+            new_max_id = max(new_max_id or 0, post_id)
             continue
         # --------------------------------
 
@@ -283,23 +299,25 @@ for i, target in enumerate(url_list, start=1):
             sent_post_ids.add(post_id)
         
         # --- 変更前 ---
-        # new_last_id = max(new_last_id or 0, post_id)
+        # current_batch_ids.append(post_id)
         # -------------
         
-        # --- 変更後：通知した投稿番号をリストに追加 ---
+        # --- 変更後：通知した投稿番号をリストに追加し、最大値も更新しておく ---
         current_batch_ids.append(post_id)
+        new_max_id = max(new_max_id or 0, post_id)
         # ------------------------------------------------------
 
+    
     # --- 変更前 ---
-    # if new_last_id and new_last_id != last_id:
-    #     save_last_post_id_local(board_id, new_last_id)
+    # if current_batch_ids:
+    #     save_last_post_ids_local(board_id, current_batch_ids)
     # else:
     #     print(" [LOG] 新着なし")
     # -------------
     
-    # --- 変更後：リストに変化があった時のみ保存 ---
+    # --- 変更後：A（最大値）とB（今回処理したリスト）を保存 ---
     if current_batch_ids:
-        save_last_post_ids_local(board_id, current_batch_ids)
+        save_last_post_ids_local_ab(board_id, new_max_id, current_batch_ids)
     else:
         print(" [LOG] 新着なし")
     # --------------------------------------------------------------------------
