@@ -5,7 +5,7 @@ import time
 import json
 import io
 import subprocess
-import hashlib # 追加：URLをハッシュ化するための標準ライブラリ
+import hashlib # URLをハッシュ化するための標準ライブラリ
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -32,36 +32,11 @@ URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
 updated_files = []
 
 # ===== 状態管理 =====
-# --- 変更前元のコード ---
-# def get_board_id(url: str) -> str:
-#     """URL全体から一意のファイル名用IDを生成する"""
-#     safe_id = re.sub(r'https?://', '', url)
-#     safe_id = re.sub(r'[\/:?=&]', '_', safe_id)
-#     return safe_id
-# -----------------------
-
-# --- 変更後：URLを完全に秘匿化したハッシュ文字列に変換し、連番を付ける ---
 def get_board_id(url: str, index: int) -> str:
     """URLを解読不可のハッシュにし、Secretsの順番(index)を先頭に付与します"""
     hashed = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
     return f"{index:02d}_{hashed}"
-# -----------------------------------------------------------------
 
-
-# --- 変更前元のコード ---
-# def load_last_post_ids(board_id: str):
-#     """txtファイルから前回の投稿番号のリストを読み込みます"""
-#     fname = f"last_post_id_{board_id}.txt"
-#     if not os.path.exists(fname): return []
-#     try:
-#         with open(fname, "r", encoding="utf-8") as f:
-#             content = f.read().strip()
-#             if not content: return []
-#             return [int(x) for x in content.split(",") if x.strip().isdigit()]
-#     except: return []
-# -----------------------
-
-# --- 変更後：A（最大番号）とB（通知リスト）を2行で分けて管理するように修正 ---
 def load_last_post_ids_ab(board_id: str):
     """txtファイルから1行目(A:最大番号)と2行目(B:リスト)を読み込みます"""
     fname = f"last_post_id_{board_id}.txt"
@@ -80,20 +55,7 @@ def load_last_post_ids_ab(board_id: str):
                 id_list = [int(x) for x in lines[1].split(",") if x.strip().isdigit()]
             return max_id, id_list
     except: return None, []
-# -------------------------------------------------------------
 
-
-# --- 変更前元のコード ---
-# def save_last_post_ids_local(board_id: str, post_ids: list):
-#     """今回通知した複数の投稿番号をカンマ区切りのリスト形式で保存します"""
-#     fname = f"last_post_id_{board_id}.txt"
-#     with open(fname, "w", encoding="utf-8") as f:
-#         f.write(",".join(map(str, sorted(post_ids))))
-#     if fname not in updated_files:
-#         updated_files.append(fname)
-# -----------------------
-
-# --- 変更後：AとBを分けて保存するように修正（テストでの手動変更をしやすくするため） ---
 def save_last_post_ids_local_ab(board_id: str, max_id: int, post_ids: list):
     """1行目に最大番号(A)、2行目に通知リスト(B)を保存します"""
     fname = f"last_post_id_{board_id}.txt"
@@ -102,8 +64,6 @@ def save_last_post_ids_local_ab(board_id: str, max_id: int, post_ids: list):
         f.write(",".join(map(str, sorted(post_ids))))
     if fname not in updated_files:
         updated_files.append(fname)
-# --------------------------------------------------------------------------------
-
 
 def commit_and_push_all():
     """全処理の最後に1回だけまとめてプッシュ"""
@@ -217,42 +177,24 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         except: pass
 
 # ===== メインループ =====
-# --- 変更前 ---
-# for target in url_list:
-#     board_id = get_board_id(target)
-# --- 変更後：順番(index)を1から数えて一緒に取得する ---
 for index, target in enumerate(url_list, start=1):
     board_id = get_board_id(target, index)
-# ------------------------------------------------
 
     try:
         resp = requests.get(target, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
-    # --- 変更前 ---
-    # except: continue
-    # --- 変更後：エラー時にURLを出さずログを隠蔽 ---
     except Exception as e: 
         print(f" [ERROR] 掲示板 {board_id} の取得に失敗しました。（URLは秘匿されています）")
         continue
-    # ---------------------------------------------
 
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
     print(f"--- Checking board: {board_id} ---")
     
     articles = soup.select("article.resentry")
     
-    # --- 変更前 ---
-    # last_ids_list = load_last_post_ids(board_id)
-    # max_last_id = max(last_ids_list) if last_ids_list else None
-    # current_batch_ids = []
-    # -------------
-    
-    # --- 変更後：A（最大番号）とB（リスト）を別々に読み込み ---
     saved_max_id, last_ids_list = load_last_post_ids_ab(board_id)
-    # 処理中の新しい最大値を記録する変数
     new_max_id = saved_max_id
     current_batch_ids = []
-    # -------------------------------------------------------
 
     for article in reversed(articles):
         try:
@@ -261,30 +203,32 @@ for index, target in enumerate(url_list, start=1):
         except: continue
         
         # --- 変更前 ---
-        # if max_last_id is not None and post_id <= max_last_id: continue
+        # if saved_max_id is not None and post_id <= saved_max_id: continue
         # if post_id in last_ids_list: continue
         # -------------
         
-        # --- 変更後：A（saved_max_id）とB（last_ids_list）を使ったチェック ---
-        # テストで1行目のAを手動で下げた場合、ここをすり抜けて通知テストが行われます
-        if saved_max_id is not None and post_id <= saved_max_id: continue
-        if post_id in last_ids_list: continue
+        # --- 変更後：手動テスト（Aを下げる行為）を優先するよう修正 ---
+        # 1行目(A)の数字以下であれば、問答無用でスキップします（通常時）
+        if saved_max_id is not None and post_id <= saved_max_id:
+            continue
+        
+        # 2行目(B)の履歴にある場合でも、もし「1行目(A)」がそのIDより小さければ
+        # あなたがテストのために意図的にAを下げたと判断し、通知を許可します。
+        if post_id in last_ids_list:
+            if saved_max_id is not None and post_id > saved_max_id:
+                # Aより大きいIDなので、Bに含まれていても「再通知テスト中」とみなして通します
+                pass
+            else:
+                # それ以外（AもBも超えていない）ならスキップ
+                continue
         # ------------------------------------------------------
 
         if post_id in sent_post_ids: continue
         
-        # --- 変更前 ---
-        # if max_last_id is None:
-        #     current_batch_ids.append(post_id)
-        #     continue
-        # -------------
-        
-        # --- 変更後：初回実行時の処理（最大値を記録する処理を追加） ---
         if saved_max_id is None:
             current_batch_ids.append(post_id)
             new_max_id = max(new_max_id or 0, post_id)
             continue
-        # --------------------------------
 
         print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
         posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
@@ -298,28 +242,12 @@ for index, target in enumerate(url_list, start=1):
             send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
             sent_post_ids.add(post_id)
         
-        # --- 変更前 ---
-        # current_batch_ids.append(post_id)
-        # -------------
-        
-        # --- 変更後：通知した投稿番号をリストに追加し、最大値も更新しておく ---
         current_batch_ids.append(post_id)
         new_max_id = max(new_max_id or 0, post_id)
-        # ------------------------------------------------------
 
-    
-    # --- 変更前 ---
-    # if current_batch_ids:
-    #     save_last_post_ids_local(board_id, current_batch_ids)
-    # else:
-    #     print(" [LOG] 新着なし")
-    # -------------
-    
-    # --- 変更後：A（最大値）とB（今回処理したリスト）を保存 ---
     if current_batch_ids:
         save_last_post_ids_local_ab(board_id, new_max_id, current_batch_ids)
     else:
         print(" [LOG] 新着なし")
-    # --------------------------------------------------------------------------
 
 commit_and_push_all()
