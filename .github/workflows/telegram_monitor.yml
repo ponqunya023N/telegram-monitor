@@ -1,17 +1,9 @@
 name: Telegram Monitor
 
 on:
-# --- 変更前元のコード（不要なスケジュールなどの記載部分をコメントアウト） ---
-#  repository_dispatch:
-#    types: [trigger_monitor, board_updated]
-#  workflow_dispatch:
-# ---------------------------------------------------------------------
-
-# --- 変更後：Cloudflareからの合図を受け付けて起動する設定 ---
   repository_dispatch:
-    types: [trigger_monitor]  # Cloudflareからはこの名前で合図が送られてきます
-  workflow_dispatch:          # 手動でテスト実行したい時のためのボタンです
-# --------------------------------------------------------
+    types: [trigger_monitor, board_updated]
+  workflow_dispatch:
 
 # 今誰かが実行中であれば、次の処理はそれが終わるまで順番待ちをします
 concurrency:
