@@ -38,22 +38,51 @@ def get_board_id(url: str) -> str:
     safe_id = re.sub(r'[\/:?=&]', '_', safe_id)
     return safe_id
 
-def load_last_post_id(board_id: str):
+# --- 変更前元のコード（極力残すルールに則りコメントアウト） ---
+# def load_last_post_id(board_id: str):
+#     fname = f"last_post_id_{board_id}.txt"
+#     if not os.path.exists(fname): return None
+#     try:
+#         with open(fname, "r", encoding="utf-8") as f:
+#             content = f.read().strip()
+#             return int(content) if content else None
+#     except: return None
+# -------------------------------------------------------------
+
+# --- 変更後：あなたの案を採用し、IDのリストを読み込むように修正 ---
+def load_last_post_ids(board_id: str):
+    """txtファイルから前回の投稿番号のリストを読み込みます"""
     fname = f"last_post_id_{board_id}.txt"
-    if not os.path.exists(fname): return None
+    if not os.path.exists(fname): return []
     try:
         with open(fname, "r", encoding="utf-8") as f:
             content = f.read().strip()
-            return int(content) if content else None
-    except: return None
+            if not content: return []
+            # カンマ区切りでリスト化。古い形式(単一の数字)のtxtファイルにもそのまま対応できます
+            return [int(x) for x in content.split(",") if x.strip().isdigit()]
+    except: return []
+# -------------------------------------------------------------
 
-def save_last_post_id_local(board_id: str, post_id: int):
-    """ローカルファイルのみ更新し、更新ファイルリストに追加"""
+# --- 変更前元のコード ---
+# def save_last_post_id_local(board_id: str, post_id: int):
+#     """ローカルファイルのみ更新し、更新ファイルリストに追加"""
+#     fname = f"last_post_id_{board_id}.txt"
+#     with open(fname, "w", encoding="utf-8") as f:
+#         f.write(str(post_id))
+#     if fname not in updated_files:
+#         updated_files.append(fname)
+# -----------------------
+
+# --- 変更後：通知したIDのリストをカンマ区切りで保存するように修正 ---
+def save_last_post_ids_local(board_id: str, post_ids: list):
+    """今回通知した複数の投稿番号をカンマ区切りのリスト形式で保存します"""
     fname = f"last_post_id_{board_id}.txt"
     with open(fname, "w", encoding="utf-8") as f:
-        f.write(str(post_id))
+        # リストの中身をカンマ(,)で繋いでtxtに書き込みます
+        f.write(",".join(map(str, sorted(post_ids))))
     if fname not in updated_files:
         updated_files.append(fname)
+# -------------------------------------------------------------
 
 def commit_and_push_all():
     """全処理の最後に1回だけまとめてプッシュ"""
@@ -178,8 +207,19 @@ for target in url_list:
     print(f"--- Checking board: {board_id} ---")
     
     articles = soup.select("article.resentry")
-    last_id = load_last_post_id(board_id)
-    new_last_id = last_id
+    
+    # --- 変更前 ---
+    # last_id = load_last_post_id(board_id)
+    # new_last_id = last_id
+    # -------------
+    
+    # --- 変更後：リストを取得し、その中の最大値も把握しておく ---
+    last_ids_list = load_last_post_ids(board_id)
+    max_last_id = max(last_ids_list) if last_ids_list else None
+    
+    # 今回の処理で新たに通知対象となった投稿番号だけを入れる空のリストを準備します
+    current_batch_ids = []
+    # -------------------------------------------------------
 
     for article in reversed(articles):
         try:
@@ -187,12 +227,30 @@ for target in url_list:
             post_id = int(re.search(r'\d+', eno_text).group())
         except: continue
 
-        if last_id is not None and post_id <= last_id: continue
+        # --- 変更前 ---
+        # if last_id is not None and post_id <= last_id: continue
+        # -------------
+        
+        # --- 変更後：あなたの案に基づく二重の重複防止チェック ---
+        # 過去の最大ID以下の古い投稿、または「前回のリスト」にすでに含まれている場合はスキップします
+        if max_last_id is not None and post_id <= max_last_id: continue
+        if post_id in last_ids_list: continue
+        # ------------------------------------------------------
+
         if post_id in sent_post_ids: continue
         
-        if last_id is None:
-            new_last_id = max(new_last_id or 0, post_id)
+        # --- 変更前 ---
+        # if last_id is None:
+        #     new_last_id = max(new_last_id or 0, post_id)
+        #     continue
+        # -------------
+        
+        # --- 変更後：初回実行時の処理 ---
+        if max_last_id is None:
+            # 初回は通知せずに投稿番号だけをリストに控えておきます
+            current_batch_ids.append(post_id)
             continue
+        # --------------------------------
 
         print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
         posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
@@ -206,11 +264,28 @@ for target in url_list:
             send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
             sent_post_ids.add(post_id)
         
-        new_last_id = max(new_last_id or 0, post_id)
+        # --- 変更前 ---
+        # new_last_id = max(new_last_id or 0, post_id)
+        # -------------
+        
+        # --- 変更後：通知した投稿番号をリストに追加して控えておく ---
+        current_batch_ids.append(post_id)
+        # ------------------------------------------------------
 
-    if new_last_id and new_last_id != last_id:
-        save_last_post_id_local(board_id, new_last_id)
+    # --- 変更前 ---
+    # if new_last_id and new_last_id != last_id:
+    #     save_last_post_id_local(board_id, new_last_id)
+    # else:
+    #     print(" [LOG] 新着なし")
+    # -------------
+    
+    # --- 変更後：あなたの「リストに変化があった時のみ保存する」というルールの実装 ---
+    if current_batch_ids:
+        # 新しく通知したもの（または初回読み込み分）があれば、そのリストを保存します
+        save_last_post_ids_local(board_id, current_batch_ids)
     else:
+        # 新着が全くない場合はリストを上書きせず、何もしません（あなたの案の通りです）
         print(" [LOG] 新着なし")
+    # --------------------------------------------------------------------------
 
 commit_and_push_all()
