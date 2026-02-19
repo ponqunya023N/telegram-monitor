@@ -5,7 +5,7 @@ import time
 import json
 import io
 import subprocess
-import hashlib # URLをハッシュ化するための標準ライブラリ
+import hashlib # IDをハッシュ化するための標準ライブラリ
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -19,11 +19,11 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 
-# --- 秘匿化のための追加設定 ---
-# 特定のドメイン名などを外部から読み込みます
-DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") # 例: .5chan.jp
-EXTERNAL_DOMAINS = os.environ.get("EXTERNAL_DOMAINS", "").split(",") # 例: upup.be,imgef.com
-# ----------------------------
+# --- 秘匿設定 ---
+DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") 
+EXTERNAL_DOMAINS = os.environ.get("EXTERNAL_DOMAINS", "").split(",") 
+MEDIA_PREFIX = "cdn" 
+# ----------------
 
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
     print("Missing environment variables.")
@@ -39,12 +39,12 @@ updated_files = []
 
 # ===== 状態管理 =====
 def get_board_id(url: str, index: int) -> str:
-    """URLを解読不可のハッシュにし、Secretsの順番(index)を先頭に付与します"""
+    """URLを識別用の符号に変換します"""
     hashed = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
     return f"{index:02d}_{hashed}"
 
 def load_last_post_ids_ab(board_id: str):
-    """txtファイルから1行目(A:最大番号)と2行目(B:リスト)を読み込みます"""
+    """保存されたID情報を読み込みます"""
     fname = f"last_post_id_{board_id}.txt"
     if not os.path.exists(fname): return None, []
     try:
@@ -52,10 +52,10 @@ def load_last_post_ids_ab(board_id: str):
             lines = f.read().strip().splitlines()
             if not lines: return None, []
             
-            # 1行目：A (最大番号)
+            # 1行目：最大番号
             max_id = int(lines[0]) if lines[0].strip().isdigit() else None
             
-            # 2行目：B (前回通知した番号のリスト)
+            # 2行目：通知済みリスト
             id_list = []
             if len(lines) > 1:
                 id_list = [int(x) for x in lines[1].split(",") if x.strip().isdigit()]
@@ -63,7 +63,7 @@ def load_last_post_ids_ab(board_id: str):
     except: return None, []
 
 def save_last_post_ids_local_ab(board_id: str, max_id: int, post_ids: list):
-    """1行目に最大番号(A)、2行目に通知リスト(B)を保存します"""
+    """最新のID情報を保存します"""
     fname = f"last_post_id_{board_id}.txt"
     with open(fname, "w", encoding="utf-8") as f:
         f.write(f"{max_id}\n")
@@ -72,9 +72,9 @@ def save_last_post_ids_local_ab(board_id: str, max_id: int, post_ids: list):
         updated_files.append(fname)
 
 def commit_and_push_all():
-    """全処理の最後に1回だけまとめてプッシュ"""
+    """IDファイルの更新を確定させます"""
     if not updated_files:
-        print(" [LOG] 更新が必要なIDファイルはありません。")
+        print(" [LOG] No ID files to update.")
         return
     
     if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -86,15 +86,16 @@ def commit_and_push_all():
             
             status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
             if status.stdout.strip():
-                subprocess.run(["git", "commit", "-m", "update multiple last_ids"], check=True)
+                subprocess.run(["git", "commit", "-m", "update files"], check=True)
                 subprocess.run(["git", "pull", "--rebase"], check=False)
                 subprocess.run(["git", "push"], check=True)
-                print(f" [LOG] {len(updated_files)}件のIDファイルをプッシュしました。")
+                print(f" [LOG] Pushed {len(updated_files)} files.")
         except Exception as e:
             print(f" [ERROR] Push failed: {e}")
 
-# ===== 送信ロジック・ユーティリティ =====
+# ===== 解析・送信ロジック =====
 def extract_urls(text: str):
+    """テキストからURLを抽出します"""
     found = URL_PATTERN.findall(text)
     unique_urls = sorted(list(set(found)))
     filtered_urls = []
@@ -106,8 +107,7 @@ def extract_urls(text: str):
     return filtered_urls
 
 def resolve_external_media(url):
-    """特定の外部ページから動画URLを抽出する"""
-    # 外部ドメイン設定に含まれるか確認
+    """外部ページからメディアを抽出します"""
     is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain)
     
     if is_target:
@@ -131,7 +131,8 @@ def resolve_external_media(url):
     return None
 
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
-    print(f"      [LOG] 投稿#{post_id} のメディア解析開始")
+    """解析結果をTelegramへ送信します"""
+    print(f"      [LOG] Analyzing media for #{post_id}...")
     valid_media_list = []
     
     for m_url in media_urls:
@@ -145,10 +146,9 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         file_id = os.path.splitext(raw_file_id)[0] 
         
         netloc = parsed.netloc
-        # ドメイン名を隠蔽し、外部設定を使用して置換します
         if DOMAIN_SUFFIX and DOMAIN_SUFFIX in netloc:
             subdomain = netloc.split('.')[0]
-            netloc = f"cdn{subdomain}{DOMAIN_SUFFIX}"
+            netloc = f"{MEDIA_PREFIX}{subdomain}{DOMAIN_SUFFIX}"
 
         candidates = []
         for ext in ["mp4", "mpg", "mov", "webm", "gif", "wmv"]:
@@ -164,7 +164,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             except: continue
 
     caption = f"<b>【{board_name}】</b>\n#{post_id} | {posted_at}\n\n{body_text[:400]}"
-    # ボタンの日本語ラベルを英語に変更して秘匿性を高めています
     keyboard = {"inline_keyboard": [[{"text": "Site", "url": board_url}, {"text": "Original", "url": target_post_url}]]}
 
     if not valid_media_list:
@@ -187,7 +186,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
                 )
         except: pass
 
-# ===== メインループ =====
+# ===== 処理実行ループ =====
 for index, target in enumerate(url_list, start=1):
     board_id = get_board_id(target, index)
 
@@ -195,11 +194,11 @@ for index, target in enumerate(url_list, start=1):
         resp = requests.get(target, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
     except Exception as e: 
-        print(f" [ERROR] 掲示板 {board_id} の取得に失敗しました。（URLは秘匿されています）")
+        print(f" [ERROR] Target {board_id} failed. (URL hidden)")
         continue
 
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
-    print(f"--- Checking board: {board_id} ---")
+    print(f"--- Checking: {board_id} ---")
     
     articles = soup.select("article.resentry")
     
@@ -213,18 +212,13 @@ for index, target in enumerate(url_list, start=1):
             post_id = int(re.search(r'\d+', eno_text).group())
         except: continue
         
-        # 1行目(A)の数字以下であれば、問答無用でスキップします
         if saved_max_id is not None and post_id <= saved_max_id:
             continue
         
-        # 2行目(B)の履歴にある場合でも、もし「1行目(A)」がそのIDより小さければ
-        # あなたがテストのために意図的にAを下げたと判断し、通知を許可します。
         if post_id in last_ids_list:
             if saved_max_id is not None and post_id > saved_max_id:
-                # Aより大きいIDなので、Bに含まれていても「再通知テスト中」とみなして通します
                 pass
             else:
-                # それ以外（AもBも超えていない）ならスキップ
                 continue
 
         if post_id in sent_post_ids: continue
@@ -234,7 +228,7 @@ for index, target in enumerate(url_list, start=1):
             new_max_id = max(new_max_id or 0, post_id)
             continue
 
-        print(f"  -> [NEW] 投稿#{post_id} を検知しました。")
+        print(f"  -> [NEW] Item #{post_id} detected.")
         posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
         body_text = article.select_one("div.comment").get_text("\n", strip=True) if article.select_one("div.comment") else ""
         
@@ -252,6 +246,6 @@ for index, target in enumerate(url_list, start=1):
     if current_batch_ids:
         save_last_post_ids_local_ab(board_id, new_max_id, current_batch_ids)
     else:
-        print(" [LOG] 新着なし")
+        print(" [LOG] No new items.")
 
 commit_and_push_all()
