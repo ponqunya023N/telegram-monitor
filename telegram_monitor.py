@@ -19,6 +19,12 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 
+# --- 秘匿化のための追加設定 ---
+# 特定のドメイン名などを外部から読み込みます
+DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") # 例: .5chan.jp
+EXTERNAL_DOMAINS = os.environ.get("EXTERNAL_DOMAINS", "").split(",") # 例: upup.be,imgef.com
+# ----------------------------
+
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
     print("Missing environment variables.")
     sys.exit(1)
@@ -100,8 +106,11 @@ def extract_urls(text: str):
     return filtered_urls
 
 def resolve_external_media(url):
-    """upup.beやimgef.comなどの外部ページから動画URLを抽出する"""
-    if "upup.be" in url or "imgef.com" in url:
+    """特定の外部ページから動画URLを抽出する"""
+    # 外部ドメイン設定に含まれるか確認
+    is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain)
+    
+    if is_target:
         try:
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
@@ -136,9 +145,10 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         file_id = os.path.splitext(raw_file_id)[0] 
         
         netloc = parsed.netloc
-        if not netloc.startswith("cdn") and ".5chan.jp" in netloc:
+        # ドメイン名を隠蔽し、外部設定を使用して置換します
+        if DOMAIN_SUFFIX and DOMAIN_SUFFIX in netloc:
             subdomain = netloc.split('.')[0]
-            netloc = f"cdn{subdomain}.5chan.jp"
+            netloc = f"cdn{subdomain}{DOMAIN_SUFFIX}"
 
         candidates = []
         for ext in ["mp4", "mpg", "mov", "webm", "gif", "wmv"]:
@@ -154,7 +164,8 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             except: continue
 
     caption = f"<b>【{board_name}】</b>\n#{post_id} | {posted_at}\n\n{body_text[:400]}"
-    keyboard = {"inline_keyboard": [[{"text": "掲示板", "url": board_url}, {"text": "投稿", "url": target_post_url}]]}
+    # ボタンの日本語ラベルを英語に変更して秘匿性を高めています
+    keyboard = {"inline_keyboard": [[{"text": "Site", "url": board_url}, {"text": "Original", "url": target_post_url}]]}
 
     if not valid_media_list:
         requests.post(
@@ -202,13 +213,7 @@ for index, target in enumerate(url_list, start=1):
             post_id = int(re.search(r'\d+', eno_text).group())
         except: continue
         
-        # --- 変更前 ---
-        # if saved_max_id is not None and post_id <= saved_max_id: continue
-        # if post_id in last_ids_list: continue
-        # -------------
-        
-        # --- 変更後：手動テスト（Aを下げる行為）を優先するよう修正 ---
-        # 1行目(A)の数字以下であれば、問答無用でスキップします（通常時）
+        # 1行目(A)の数字以下であれば、問答無用でスキップします
         if saved_max_id is not None and post_id <= saved_max_id:
             continue
         
@@ -221,7 +226,6 @@ for index, target in enumerate(url_list, start=1):
             else:
                 # それ以外（AもBも超えていない）ならスキップ
                 continue
-        # ------------------------------------------------------
 
         if post_id in sent_post_ids: continue
         
