@@ -106,14 +106,14 @@ def extract_urls(text: str):
         filtered_urls.append(url)
     return filtered_urls
 
-# 変更箇所: リストページから個別ページを解析するため、階層を管理する引数 depth を追加しました
 def resolve_external_media(url, depth=0):
     """外部ページからメディアを抽出します"""
-    # 階層を制限（リストページ -> 個別ページ の1階層のみ追跡し、無限ループを防ぎます）
     if depth > 1:
         return None
 
-    is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain)
+    # 解析対象ドメインの判定（設定された外部ドメイン、または掲示板自身のドメインを対象にする）
+    parsed_url = urlparse(url)
+    is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain) or "upup.be" in parsed_url.netloc
     
     if is_target:
         try:
@@ -121,50 +121,56 @@ def resolve_external_media(url, depth=0):
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
                 
-                # --- 元のコード：ページ内に直接動画があるか探す ---
+                # --- ページ内から直接メディアリンクを探す ---
+                found_media_in_page = []
+                
+                # videoタグの確認
                 video_tag = soup.find("video")
                 if video_tag:
                     src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
                     if src:
-                        full_url = urljoin(url, src)
-                        ext = full_url.split(".")[-1].split("?")[0]
-                        return {"type": "video", "url": full_url, "ext": ext}
-                for a in soup.find_all("a", href=True):
-                    if ".mov" in a["href"].lower() or ".mp4" in a["href"].lower():
-                        full_url = urljoin(url, a["href"])
-                        ext = full_url.split(".")[-1].split("?")[0]
-                        return {"type": "video", "url": full_url, "ext": ext}
+                        full_v_url = urljoin(url, src)
+                        ext = full_v_url.split(".")[-1].split("?")[0]
+                        found_media_in_page.append({"type": "video", "url": full_v_url, "ext": ext})
 
-                # --- 変更箇所: 動画が直接見つからなかった場合、リストページと仮定して個別リンクを探す ---
+                # aタグ（動画拡張子）の確認 - デバッグ情報のimgef.com等のリンクをここで拾います
+                for a in soup.find_all("a", href=True):
+                    href_lower = a["href"].lower()
+                    if any(ext in href_lower for ext in [".mp4", ".mov", ".wmv", ".webm"]):
+                        full_v_url = urljoin(url, a["href"])
+                        ext = full_v_url.split(".")[-1].split("?")[0]
+                        media_obj = {"type": "video", "url": full_v_url, "ext": ext}
+                        if media_obj not in found_media_in_page:
+                            found_media_in_page.append(media_obj)
+
+                # 個別ページ（depth=1）で見つかった場合は、それを返す
+                if depth == 1 and found_media_in_page:
+                    return found_media_in_page
+
+                # --- 階層0（リストページ）の場合、さらに子ページを探す ---
                 if depth == 0:
-                    found_media_list = []
-                    parsed_base = urlparse(url)
-                    # 元のURLのパスの末尾（ID部分）を取得します
-                    base_id = parsed_base.path.strip('/').split('/')[-1] 
+                    found_media_list = found_media_in_page # 既に自身で見つかっていれば追加
+                    
+                    # 親URLの末尾（ID）を特定
+                    base_id = parsed_url.path.strip('/').split('/')[-1] 
                     
                     child_links = []
-                    # ページ内のすべてのリンクを確認します
                     for a in soup.find_all("a", href=True):
                         full_child_url = urljoin(url, a["href"])
                         parsed_child = urlparse(full_child_url)
                         
-                        # 同一ドメイン内で、元のURLとは異なり、かつ元のIDがURL内に含まれるものを個別ページとみなします
-                        if parsed_child.netloc == parsed_base.netloc and full_child_url != url:
+                        # 同一ホスト内で、URLが異なり、かつ親IDが含まれるものを子ページとみなす
+                        if parsed_child.netloc == parsed_url.netloc and full_child_url != url:
                             if base_id and base_id in full_child_url:
                                 child_links.append(full_child_url)
                     
-                    # 重複を排除してそれぞれの個別ページを解析します
                     for child_url in set(child_links):
-                        # 個別ページを対象に再帰的に関数を呼び出します（depthを1にします）
-                        child_result = resolve_external_media(child_url, depth=1)
-                        if child_result:
-                            # 複数のメディアが返ってきた場合と、1つの場合で処理を分けます
-                            if isinstance(child_result, list):
-                                found_media_list.extend(child_result)
-                            else:
-                                found_media_list.append(child_result)
+                        child_results = resolve_external_media(child_url, depth=1)
+                        if child_results:
+                            for r in child_results:
+                                if r not in found_media_list:
+                                    found_media_list.append(r)
                     
-                    # 複数見つかった場合はリストとして返します
                     if found_media_list:
                         return found_media_list
 
@@ -179,13 +185,13 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     for m_url in media_urls:
         external = resolve_external_media(m_url)
         if external:
-            # 変更箇所: resolve_external_mediaが複数の動画を返した（リスト形式）場合の結合処理を追加しました
             if isinstance(external, list):
                 valid_media_list.extend(external)
             else:
                 valid_media_list.append(external)
             continue
 
+        # 以下、従来通りの特定ドメイン向けURL変換ロジック
         parsed = urlparse(m_url)
         raw_file_id = parsed.path.rstrip("/").split("/")[-1]
         file_id = os.path.splitext(raw_file_id)[0] 
@@ -208,17 +214,25 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
                     break
             except: continue
 
+    # 重複排除
+    unique_media = []
+    seen_urls = set()
+    for m in valid_media_list:
+        if m["url"] not in seen_urls:
+            unique_media.append(m)
+            seen_urls.add(m["url"])
+
     caption = f"<b>【{board_name}】</b>\n#{post_id} | {posted_at}\n\n{body_text[:400]}"
     keyboard = {"inline_keyboard": [[{"text": "Site", "url": board_url}, {"text": "Original", "url": target_post_url}]]}
 
-    if not valid_media_list:
+    if not unique_media:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID, "text": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)}
         )
         return
 
-    for media in valid_media_list:
+    for media in unique_media:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
         try:
             file_res = requests.get(media["url"], headers=headers, timeout=20)
