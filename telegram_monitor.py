@@ -51,13 +51,12 @@ def extract_media_url(page_url, parent_id=None):
     """
     指定されたURLのページから動画URLを抽出する。
     """
-    # 子ページへのアクセス時はリファラ（どこから来たか）を追加
     local_headers = HEADERS.copy()
     if parent_id:
-        local_headers["Referer"] = TARGET_URL
+        local_headers["Referer"] = page_url
     
     try:
-        # サーバー負荷を考慮し、子ページ読み込み前に少し待機
+        # 子ページ読み込み前に少し待機
         if parent_id:
             time.sleep(1)
             
@@ -79,19 +78,17 @@ def extract_media_url(page_url, parent_id=None):
         if og_video and og_video.get("content"):
             return og_video.get("content")
 
-        # 3. 親ページの場合のみ、子ページへのリンクを深く探す
+        # 3. 親ページの場合のみ、子ページへのリンク（upup.beなど）を探す
         if parent_id:
             links = soup.find_all("a", href=True)
             for link in links:
                 href = link["href"]
-                # ID（例: KKXCQ7Xa）がURLに含まれているか確認
-                if parent_id in href:
-                    # 相対パスを絶対パスに変換
+                # ユーザー提示の動画URL形式をカバー
+                if "upup.be" in href:
                     from urllib.parse import urljoin
                     child_url = urljoin(page_url, href)
-                    
-                    print(f"     [LOG] Target link found: {child_url}")
-                    # 子ページを解析（再帰呼び出し）
+                    print(f"     [LOG] Analyzing child page: {child_url}")
+                    # 再帰的に動画を探す
                     media_url = extract_media_url(child_url, parent_id=None)
                     if media_url:
                         return media_url
@@ -108,55 +105,42 @@ def main():
         print("[ERROR] 設定が不足しています。環境変数を確認してください。")
         return
 
+    # URLをカンマで分割してリスト化
+    url_list = [u.strip() for u in TARGET_URL.split(',')]
     prev_status = load_status()
-    
-    try:
-        # メインページ取得時にもHEADERSを適用（403回避の肝）
-        response = requests.get(TARGET_URL, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
+    current_status = {}
+    new_found = False
+
+    for url in url_list:
+        if not url:
+            continue
+            
+        # URL末尾やID部分をキーにする（5chanの短縮URL末尾などを利用）
+        item_id = url.split('/')[-1]
+        current_status[item_id] = True
         
-        # 投稿アイテムの特定ロジック
-        # ここはサイトのHTML構造に依存します。現在のロジックは<a>タグからIDを抽出する例です。
-        items = soup.find_all("a", href=re.compile(r"id=")) 
+        if item_id not in prev_status:
+            print(f"  -> [NEW] Item #{item_id} detected.")
+            print(f"      [LOG] Analyzing media for {url}...")
+            
+            # 動画URLを抽出（5chanURL -> upup.be などの遷移を追跡）
+            media_url = extract_media_url(url, parent_id=item_id)
+            
+            if media_url:
+                message = f"<b>【新着通知】</b>\n元URL: {url}\n動画: {media_url}"
+            else:
+                message = f"<b>【新着通知】</b>\n元URL: {url}\n(動画URLは見つかりませんでした)"
+            
+            send_telegram_message(message)
+            new_found = True
+        else:
+            # 既知のアイテムもcurrent_statusには残す
+            pass
+
+    if not new_found:
+        print(" [LOG] No new items.")
         
-        new_found = False
-        current_status = {}
-
-        for item in items:
-            href = item.get("href", "")
-            item_id_match = re.search(r"id=([^&?]+)", href)
-            if not item_id_match:
-                continue
-            
-            item_id = item_id_match.group(1)
-            current_status[item_id] = True
-            
-            if item_id not in prev_status:
-                print(f"  -> [NEW] Item #{item_id} detected.")
-                print(f"      [LOG] Analyzing media for #{item_id}...")
-                
-                # 動画URLの抽出（親ページから子ページへと辿る）
-                media_url = extract_media_url(TARGET_URL, parent_id=item_id)
-                
-                if media_url:
-                    message = f"<b>【新着通知】</b>\nID: {item_id}\n動画: {media_url}"
-                else:
-                    # 子ページURL自体を特定できている場合はそれを送る
-                    message = f"<b>【新着通知】</b>\nID: {item_id}\n(動画URLは取得できませんでした。サイトを確認してください)"
-                
-                send_telegram_message(message)
-                new_found = True
-
-        if not new_found:
-            print(" [LOG] No new items.")
-            
-        save_status(current_status)
-
-    except Exception as e:
-        # 403エラー等の詳細を出力
-        print(f"[ERROR] メイン処理失敗: {e}")
-
+    save_status(current_status)
     print(" [LOG] Execution completed.")
 
 if __name__ == "__main__":
