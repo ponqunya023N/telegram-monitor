@@ -1,147 +1,251 @@
 import os
-import requests
-from bs4 import BeautifulSoup
+import sys
+import re
 import time
 import json
-import re
+import io
+import subprocess
+import hashlib # IDをハッシュ化するための標準ライブラリ
+from urllib.parse import urljoin, urlparse
 
-# --- 設定項目 ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TARGET_URL = os.getenv("TARGET_URL")
+import requests
+from bs4 import BeautifulSoup
 
-# ステータス保存ファイル
-STATUS_FILE = "last_status.json"
+# ===== 設定スイッチ =====
+LOG_WITH_TITLE = False 
 
-# 共通ヘッダー（ブラウザを装い403エラーを回避）
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-}
+# ===== 定数・環境変数 =====
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TARGET_URL = os.environ.get("TARGET_URL")
 
-# LOG_WITH_TITLE = False # [2026-02-11] ユーザー指示により無効化
+# --- 秘匿設定 ---
+DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") 
+EXTERNAL_DOMAINS = os.environ.get("EXTERNAL_DOMAINS", "").split(",") 
+MEDIA_PREFIX = "cdn" 
+# ----------------
 
-def send_telegram_message(message):
-    """Telegramにメッセージを送信する"""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    try:
-        requests.post(url, json=payload, headers=HEADERS)
-    except Exception as e:
-        print(f"[ERROR] Telegram送信失敗: {e}")
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
+    print("Missing environment variables.")
+    sys.exit(1)
 
-def load_status():
-    """前回の状態を読み込む"""
-    if os.path.exists(STATUS_FILE):
-        with open(STATUS_FILE, "r") as f:
-            return json.load(f)
-    return {}
+url_list = [u.strip() for u in TARGET_URL.split(",") if u.strip()]
+headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+sent_post_ids = set()
+URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
 
-def save_status(status):
-    """現在の状態を保存する"""
-    with open(STATUS_FILE, "w") as f:
-        json.dump(status, f, indent=4)
+# 更新があったファイルを記録するリスト
+updated_files = []
 
-def extract_media_url(page_url, parent_id=None):
-    """
-    指定されたURLのページから動画URLを抽出する。
-    """
-    local_headers = HEADERS.copy()
-    if parent_id:
-        local_headers["Referer"] = page_url
-    
-    try:
-        # 子ページ読み込み前に少し待機
-        if parent_id:
-            time.sleep(1)
-            
-        response = requests.get(page_url, headers=local_headers, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # 1. ページ内の動画タグを直接探す
-        video_tag = soup.find("video")
-        if video_tag:
-            source_tag = video_tag.find("source")
-            if source_tag and source_tag.get("src"):
-                return source_tag.get("src")
-            if video_tag.get("src"):
-                return video_tag.get("src")
-        
-        # 2. メタタグ(og:video)を探す
-        og_video = soup.find("meta", property="og:video") or soup.find("meta", property="og:video:url")
-        if og_video and og_video.get("content"):
-            return og_video.get("content")
+# ===== 状態管理 =====
+def get_board_id(url: str, index: int) -> str:
+    """URLを識別用の符号に変換します"""
+    hashed = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
+    return f"{index:02d}_{hashed}"
 
-        # 3. 親ページの場合のみ、子ページへのリンク（upup.beなど）を探す
-        if parent_id:
-            links = soup.find_all("a", href=True)
-            for link in links:
-                href = link["href"]
-                # ユーザー提示の動画URL形式をカバー
-                if "upup.be" in href:
-                    from urllib.parse import urljoin
-                    child_url = urljoin(page_url, href)
-                    print(f"     [LOG] Analyzing child page: {child_url}")
-                    # 再帰的に動画を探す
-                    media_url = extract_media_url(child_url, parent_id=None)
-                    if media_url:
-                        return media_url
+def load_last_post_ids_ab(board_id: str):
+    """保存されたID情報を読み込みます"""
+    fname = f"last_post_id_{board_id}.txt"
+    if not os.path.exists(fname): return None, []
+    try:
+        with open(fname, "r", encoding="utf-8") as f:
+            lines = f.read().strip().splitlines()
+            if not lines: return None, []
+            
+            # 1行目：最大番号
+            max_id = int(lines[0]) if lines[0].strip().isdigit() else None
+            
+            # 2行目：通知済みリスト
+            id_list = []
+            if len(lines) > 1:
+                id_list = [int(x) for x in lines[1].split(",") if x.strip().isdigit()]
+            return max_id, id_list
+    except: return None, []
 
-    except Exception as e:
-        print(f"[ERROR] ページ解析失敗({page_url}): {e}")
-    
-    return None
+def save_last_post_ids_local_ab(board_id: str, max_id: int, post_ids: list):
+    """最新のID情報を保存します"""
+    fname = f"last_post_id_{board_id}.txt"
+    with open(fname, "w", encoding="utf-8") as f:
+        f.write(f"{max_id}\n")
+        f.write(",".join(map(str, sorted(post_ids))))
+    if fname not in updated_files:
+        updated_files.append(fname)
 
-def main():
-    print(f"--- Checking: {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
-    
-    if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
-        print("[ERROR] 設定が不足しています。環境変数を確認してください。")
-        return
+def commit_and_push_all():
+    """IDファイルの更新を確定させます"""
+    if not updated_files:
+        print(" [LOG] No ID files to update.")
+        return
+    
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        try:
+            subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
+            subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
+            for f in updated_files:
+                subprocess.run(["git", "add", f], check=True)
+            
+            status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+            if status.stdout.strip():
+                subprocess.run(["git", "commit", "-m", "update files"], check=True)
+                subprocess.run(["git", "pull", "--rebase"], check=False)
+                subprocess.run(["git", "push"], check=True)
+                print(f" [LOG] Pushed {len(updated_files)} files.")
+        except Exception as e:
+            print(f" [ERROR] Push failed: {e}")
 
-    # URLをカンマで分割してリスト化
-    url_list = [u.strip() for u in TARGET_URL.split(',')]
-    prev_status = load_status()
-    current_status = {}
-    new_found = False
+# ===== 解析・送信ロジック =====
+def extract_urls(text: str):
+    """テキストからURLを抽出します"""
+    found = URL_PATTERN.findall(text)
+    unique_urls = sorted(list(set(found)))
+    filtered_urls = []
+    
+    for url in unique_urls:
+        if "/read.cgi/" in url:
+            continue
+        filtered_urls.append(url)
+    return filtered_urls
 
-    for url in url_list:
-        if not url:
-            continue
-            
-        # URL末尾やID部分をキーにする（5chanの短縮URL末尾などを利用）
-        item_id = url.split('/')[-1]
-        current_status[item_id] = True
-        
-        if item_id not in prev_status:
-            print(f"  -> [NEW] Item #{item_id} detected.")
-            print(f"      [LOG] Analyzing media for {url}...")
-            
-            # 動画URLを抽出（5chanURL -> upup.be などの遷移を追跡）
-            media_url = extract_media_url(url, parent_id=item_id)
-            
-            if media_url:
-                message = f"<b>【新着通知】</b>\n元URL: {url}\n動画: {media_url}"
-            else:
-                message = f"<b>【新着通知】</b>\n元URL: {url}\n(動画URLは見つかりませんでした)"
-            
-            send_telegram_message(message)
-            new_found = True
-        else:
-            # 既知のアイテムもcurrent_statusには残す
-            pass
+def resolve_external_media(url):
+    """外部ページからメディアを抽出します"""
+    is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain)
+    
+    if is_target:
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, "html.parser")
+                video_tag = soup.find("video")
+                if video_tag:
+                    src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
+                    if src:
+                        full_url = urljoin(url, src)
+                        ext = full_url.split(".")[-1].split("?")[0]
+                        return {"type": "video", "url": full_url, "ext": ext}
+                for a in soup.find_all("a", href=True):
+                    if ".mov" in a["href"].lower() or ".mp4" in a["href"].lower():
+                        full_url = urljoin(url, a["href"])
+                        ext = full_url.split(".")[-1].split("?")[0]
+                        return {"type": "video", "url": full_url, "ext": ext}
+        except: pass
+    return None
 
-    if not new_found:
-        print(" [LOG] No new items.")
-        
-    save_status(current_status)
-    print(" [LOG] Execution completed.")
+def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
+    """解析結果をTelegramへ送信します"""
+    print(f"      [LOG] Analyzing media for #{post_id}...")
+    valid_media_list = []
+    
+    for m_url in media_urls:
+        external = resolve_external_media(m_url)
+        if external:
+            valid_media_list.append(external)
+            continue
 
-if __name__ == "__main__":
-    main()
+        parsed = urlparse(m_url)
+        raw_file_id = parsed.path.rstrip("/").split("/")[-1]
+        file_id = os.path.splitext(raw_file_id)[0] 
+        
+        netloc = parsed.netloc
+        if DOMAIN_SUFFIX and DOMAIN_SUFFIX in netloc:
+            subdomain = netloc.split('.')[0]
+            netloc = f"{MEDIA_PREFIX}{subdomain}{DOMAIN_SUFFIX}"
+
+        candidates = []
+        for ext in ["mp4", "mpg", "mov", "webm", "gif", "wmv"]:
+            candidates.append({"type": "video", "url": f"https://{netloc}/file/{file_id}.{ext}", "ext": ext})
+        for ext in ["jpg", "jpeg", "png", "bmp"]:
+            candidates.append({"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.{ext}", "ext": ext})
+
+        for attempt in candidates:
+            try:
+                if requests.get(attempt["url"], headers=headers, stream=True, timeout=5).status_code == 200:
+                    valid_media_list.append(attempt)
+                    break
+            except: continue
+
+    caption = f"<b>【{board_name}】</b>\n#{post_id} | {posted_at}\n\n{body_text[:400]}"
+    keyboard = {"inline_keyboard": [[{"text": "Site", "url": board_url}, {"text": "Original", "url": target_post_url}]]}
+
+    if not valid_media_list:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)}
+        )
+        return
+
+    for media in valid_media_list:
+        method = "sendVideo" if media["type"] == "video" else "sendPhoto"
+        try:
+            file_res = requests.get(media["url"], headers=headers, timeout=20)
+            if file_res.status_code == 200:
+                files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_res.content)}
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+                    data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
+                    files=files
+                )
+        except: pass
+
+# ===== 処理実行ループ =====
+for index, target in enumerate(url_list, start=1):
+    board_id = get_board_id(target, index)
+
+    try:
+        resp = requests.get(target, headers=headers, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e: 
+        print(f" [ERROR] Target {board_id} failed. (URL hidden)")
+        continue
+
+    board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
+    print(f"--- Checking: {board_id} ---")
+    
+    articles = soup.select("article.resentry")
+    
+    saved_max_id, last_ids_list = load_last_post_ids_ab(board_id)
+    new_max_id = saved_max_id
+    current_batch_ids = []
+
+    for article in reversed(articles):
+        try:
+            eno_text = article.select_one("span.eno a").get_text(strip=True)
+            post_id = int(re.search(r'\d+', eno_text).group())
+        except: continue
+        
+        if saved_max_id is not None and post_id <= saved_max_id:
+            continue
+        
+        if post_id in last_ids_list:
+            if saved_max_id is not None and post_id > saved_max_id:
+                pass
+            else:
+                continue
+
+        if post_id in sent_post_ids: continue
+        
+        if saved_max_id is None:
+            current_batch_ids.append(post_id)
+            new_max_id = max(new_max_id or 0, post_id)
+            continue
+
+        print(f"  -> [NEW] Item #{post_id} detected.")
+        posted_at = article.select_one("time.date").get_text(strip=True) if article.select_one("time.date") else "N/A"
+        body_text = article.select_one("div.comment").get_text("\n", strip=True) if article.select_one("div.comment") else ""
+        
+        media_urls = [urljoin(target, a["href"]) for a in article.select(".filethumblist li a[href]")]
+        extracted = extract_urls(body_text)
+        
+        if extracted or media_urls:
+            media_urls.extend(extracted)
+            send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, target, f"{target}/{post_id}", list(set(media_urls)))
+            sent_post_ids.add(post_id)
+        
+        current_batch_ids.append(post_id)
+        new_max_id = max(new_max_id or 0, post_id)
+
+    if current_batch_ids:
+        save_last_post_ids_local_ab(board_id, new_max_id, current_batch_ids)
+    else:
+        print(" [LOG] No new items.")
+
+commit_and_push_all()
