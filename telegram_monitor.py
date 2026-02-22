@@ -106,29 +106,57 @@ def extract_urls(text: str):
         filtered_urls.append(url)
     return filtered_urls
 
-def resolve_external_media(url):
-    """外部ページからメディアを抽出します"""
+def resolve_external_media(url, depth=0):
+    """外部ページからメディアを抽出します（関連する子ページも含めて探索します）"""
     is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain)
+    results = [] # 複数の動画が見つかる可能性があるため、リスト形式に変更
     
-    if is_target:
+    if is_target and depth < 2: # 探索範囲を1階層のみに制限（無限ループ防止）
         try:
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
+                
+                # 1. 現在のページに直接配置されている動画を探す
                 video_tag = soup.find("video")
                 if video_tag:
                     src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
                     if src:
                         full_url = urljoin(url, src)
                         ext = full_url.split(".")[-1].split("?")[0]
-                        return {"type": "video", "url": full_url, "ext": ext}
+                        results.append({"type": "video", "url": full_url, "ext": ext})
+                        
                 for a in soup.find_all("a", href=True):
                     if ".mov" in a["href"].lower() or ".mp4" in a["href"].lower():
                         full_url = urljoin(url, a["href"])
                         ext = full_url.split(".")[-1].split("?")[0]
-                        return {"type": "video", "url": full_url, "ext": ext}
+                        results.append({"type": "video", "url": full_url, "ext": ext})
+                        
+                # 2. 現在のページから、関連する別の子ページへのリンクを探す（最初の親ページの時のみ）
+                if depth == 0:
+                    # URLの末尾のIDを取得（例: .../ID -> ID）
+                    parent_id = urlparse(url).path.rstrip("/").split("/")[-1]
+                    
+                    for a in soup.find_all("a", href=True):
+                        child_url = urljoin(url, a["href"])
+                        is_child_target = any(domain in child_url for domain in EXTERNAL_DOMAINS if domain)
+                        
+                        # 同じ外部ドメインかつ、親のIDがURLに含まれている別ページであれば子ページとみなして探索
+                        if is_child_target and child_url != url and parent_id and parent_id in child_url:
+                            child_results = resolve_external_media(child_url, depth=1)
+                            if child_results:
+                                results.extend(child_results)
         except: pass
-    return None
+        
+    # 重複排除処理（同じ動画URLが複数回登録されるのを防ぐため）
+    unique_results = []
+    seen_urls = set()
+    for r in results:
+        if r["url"] not in seen_urls:
+            unique_results.append(r)
+            seen_urls.add(r["url"])
+            
+    return unique_results
 
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     """解析結果をTelegramへ送信します"""
@@ -136,9 +164,9 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     valid_media_list = []
     
     for m_url in media_urls:
-        external = resolve_external_media(m_url)
-        if external:
-            valid_media_list.append(external)
+        external_results = resolve_external_media(m_url) # リストで返ってくるように変更
+        if external_results:
+            valid_media_list.extend(external_results) # 複数の動画結果を結合
             continue
 
         parsed = urlparse(m_url)
