@@ -106,76 +106,70 @@ def extract_urls(text: str):
         filtered_urls.append(url)
     return filtered_urls
 
-def resolve_external_media(url):
-    """外部ページからメディアを抽出します（子ページも含め、見つかったすべての動画を返します）"""
+# 変更箇所: リストページから個別ページを解析するため、階層を管理する引数 depth を追加しました
+def resolve_external_media(url, depth=0):
+    """外部ページからメディアを抽出します"""
+    # 階層を制限（リストページ -> 個別ページ の1階層のみ追跡し、無限ループを防ぎます）
+    if depth > 1:
+        return None
+
     is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain)
-    results = []
     
     if is_target:
-        # URLから基本となるID（例：KKXCQ7Xa）を抽出
-        url_id = urlparse(url).path.strip("/").split("/")[-1]
-        visited_urls = set([url])
-
-        # ページ内から動画情報を抜き出す補助関数
-        def extract_from_soup(soup, base_url):
-            found_media = []
-            # <video>タグを探す
-            video_tag = soup.find("video")
-            if video_tag:
-                src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
-                if src:
-                    full_url = urljoin(base_url, src)
-                    ext = full_url.split(".")[-1].split("?")[0]
-                    found_media.append({"type": "video", "url": full_url, "ext": ext})
-            # 直接.mp4等へのリンクがある場合も探す
-            for a in soup.find_all("a", href=True):
-                href = a["href"].lower()
-                if ".mov" in href or ".mp4" in href or ".mpg" in href or ".webm" in href:
-                    full_url = urljoin(base_url, a["href"])
-                    ext = full_url.split(".")[-1].split("?")[0]
-                    found_media.append({"type": "video", "url": full_url, "ext": ext})
-            return found_media
-
         try:
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
                 
-                # 1. 最初のページから動画を探す
-                results.extend(extract_from_soup(soup, url))
-                
-                # 2. ページ内にある「子ページ」へのリンクを探して巡回する
-                base_domain = urlparse(url).netloc
+                # --- 元のコード：ページ内に直接動画があるか探す ---
+                video_tag = soup.find("video")
+                if video_tag:
+                    src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
+                    if src:
+                        full_url = urljoin(url, src)
+                        ext = full_url.split(".")[-1].split("?")[0]
+                        return {"type": "video", "url": full_url, "ext": ext}
                 for a in soup.find_all("a", href=True):
-                    full_link = urljoin(url, a["href"])
-                    parsed_link = urlparse(full_link)
+                    if ".mov" in a["href"].lower() or ".mp4" in a["href"].lower():
+                        full_url = urljoin(url, a["href"])
+                        ext = full_url.split(".")[-1].split("?")[0]
+                        return {"type": "video", "url": full_url, "ext": ext}
+
+                # --- 変更箇所: 動画が直接見つからなかった場合、リストページと仮定して個別リンクを探す ---
+                if depth == 0:
+                    found_media_list = []
+                    parsed_base = urlparse(url)
+                    # 元のURLのパスの末尾（ID部分）を取得します
+                    base_id = parsed_base.path.strip('/').split('/')[-1] 
                     
-                    # 同ドメインかつ未訪問で、かつ元のURLのIDが含まれているリンクを対象にする
-                    if parsed_link.netloc == base_domain and full_link not in visited_urls:
-                        # リンク自体が動画ファイルでないこと（ページであることを期待）
-                        if not any(full_link.lower().endswith(ext) for ext in [".mp4", ".mov", ".webm"]):
-                            # URL全体（クエリパラメータ含む）のどこかにIDがあればOKとする
-                            if url_id and url_id in full_link:
-                                visited_urls.add(full_link)
-                                try:
-                                    child_res = requests.get(full_link, headers=headers, timeout=10)
-                                    if child_res.status_code == 200:
-                                        child_soup = BeautifulSoup(child_res.text, "html.parser")
-                                        results.extend(extract_from_soup(child_soup, full_link))
-                                except:
-                                    pass
-        except:
-            pass
-            
-    # 重複する動画URLを除去
-    unique_results = []
-    seen_urls = set()
-    for item in results:
-        if item["url"] not in seen_urls:
-            unique_results.append(item)
-            seen_urls.add(item["url"])
-            
-    return unique_results
+                    child_links = []
+                    # ページ内のすべてのリンクを確認します
+                    for a in soup.find_all("a", href=True):
+                        full_child_url = urljoin(url, a["href"])
+                        parsed_child = urlparse(full_child_url)
+                        
+                        # 同一ドメイン内で、元のURLとは異なり、かつ元のIDがURL内に含まれるものを個別ページとみなします
+                        if parsed_child.netloc == parsed_base.netloc and full_child_url != url:
+                            if base_id and base_id in full_child_url:
+                                child_links.append(full_child_url)
+                    
+                    # 重複を排除してそれぞれの個別ページを解析します
+                    for child_url in set(child_links):
+                        # 個別ページを対象に再帰的に関数を呼び出します（depthを1にします）
+                        child_result = resolve_external_media(child_url, depth=1)
+                        if child_result:
+                            # 複数のメディアが返ってきた場合と、1つの場合で処理を分けます
+                            if isinstance(child_result, list):
+                                found_media_list.extend(child_result)
+                            else:
+                                found_media_list.append(child_result)
+                    
+                    # 複数見つかった場合はリストとして返します
+                    if found_media_list:
+                        return found_media_list
+
+        except: pass
+    return None
 
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
     """解析結果をTelegramへ送信します"""
@@ -183,13 +177,15 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     valid_media_list = []
     
     for m_url in media_urls:
-        # 子ページも含めて動画を探す
-        externals = resolve_external_media(m_url)
-        if externals:
-            valid_media_list.extend(externals)
+        external = resolve_external_media(m_url)
+        if external:
+            # 変更箇所: resolve_external_mediaが複数の動画を返した（リスト形式）場合の結合処理を追加しました
+            if isinstance(external, list):
+                valid_media_list.extend(external)
+            else:
+                valid_media_list.append(external)
             continue
 
-        # 以下、従来のメディア解析ロジック（変更なし）
         parsed = urlparse(m_url)
         raw_file_id = parsed.path.rstrip("/").split("/")[-1]
         file_id = os.path.splitext(raw_file_id)[0] 
@@ -222,7 +218,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
         )
         return
 
-    # 見つかったすべてのメディア（動画等）を送信
     for media in valid_media_list:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
         try:
