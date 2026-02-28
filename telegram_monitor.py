@@ -107,11 +107,11 @@ def extract_urls(text: str):
     return filtered_urls
 
 def resolve_external_media(url, depth=0):
-    """外部ページからメディアを抽出します"""
+    """外部ページからメディア（画像・動画）を抽出します"""
     if depth > 1:
         return None
 
-    # 解析対象ドメインの判定（設定された外部ドメイン、または掲示板自身のドメインを対象にする）
+    # 解析対象ドメインの判定
     parsed_url = urlparse(url)
     is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain) or "upup.be" in parsed_url.netloc
     
@@ -130,26 +130,45 @@ def resolve_external_media(url, depth=0):
                     src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
                     if src:
                         full_v_url = urljoin(url, src)
-                        ext = full_v_url.split(".")[-1].split("?")[0]
+                        ext = full_v_url.split(".")[-1].split("?")[0].lower()
                         found_media_in_page.append({"type": "video", "url": full_v_url, "ext": ext})
 
-                # aタグ（動画拡張子）の確認 - デバッグ情報のimgef.com等のリンクをここで拾います
+                # imgタグの確認（新規追加：画像も検知するようにしました）
+                for img in soup.find_all("img", src=True):
+                    src = img.get("src")
+                    if src:
+                        full_img_url = urljoin(url, src)
+                        ext = full_img_url.split(".")[-1].split("?")[0].lower()
+                        if ext in ["jpg", "jpeg", "png", "gif", "webp", "bmp"]:
+                            media_obj = {"type": "photo", "url": full_img_url, "ext": ext}
+                            if media_obj not in found_media_in_page:
+                                found_media_in_page.append(media_obj)
+
+                # aタグ（動画・画像の拡張子）の確認
                 for a in soup.find_all("a", href=True):
                     href_lower = a["href"].lower()
-                    if any(ext in href_lower for ext in [".mp4", ".mov", ".wmv", ".webm"]):
-                        full_v_url = urljoin(url, a["href"])
-                        ext = full_v_url.split(".")[-1].split("?")[0]
-                        media_obj = {"type": "video", "url": full_v_url, "ext": ext}
+                    full_media_url = urljoin(url, a["href"])
+                    ext = full_media_url.split(".")[-1].split("?")[0].lower()
+
+                    # 動画拡張子のチェック
+                    if any(v_ext in href_lower for v_ext in [".mp4", ".mov", ".wmv", ".webm"]):
+                        media_obj = {"type": "video", "url": full_media_url, "ext": ext}
+                        if media_obj not in found_media_in_page:
+                            found_media_in_page.append(media_obj)
+                    
+                    # 画像拡張子のチェック（新規追加：リンク先が画像ファイルの場合も拾います）
+                    elif any(i_ext in href_lower for i_ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
+                        media_obj = {"type": "photo", "url": full_media_url, "ext": ext}
                         if media_obj not in found_media_in_page:
                             found_media_in_page.append(media_obj)
 
-                # 個別ページ（depth=1）で見つかった場合は、それを返す
+                # 個別ページ（depth=1）で見つかった場合は、それを一旦リストとして返す
                 if depth == 1 and found_media_in_page:
                     return found_media_in_page
 
                 # --- 階層0（リストページ）の場合、さらに子ページを探す ---
                 if depth == 0:
-                    found_media_list = found_media_in_page # 既に自身で見つかっていれば追加
+                    found_media_list = found_media_in_page 
                     
                     # 親URLの末尾（ID）を特定
                     base_id = parsed_url.path.strip('/').split('/')[-1] 
@@ -161,7 +180,8 @@ def resolve_external_media(url, depth=0):
                         
                         # 同一ホスト内で、URLが異なり、かつ親IDが含まれるものを子ページとみなす
                         if parsed_child.netloc == parsed_url.netloc and full_child_url != url:
-                            if base_id and base_id in full_child_url:
+                            # ID一致チェック、またはパラメータ等にIDが含まれる場合に子ページと判定
+                            if base_id and (base_id in full_child_url):
                                 child_links.append(full_child_url)
                     
                     for child_url in set(child_links):
