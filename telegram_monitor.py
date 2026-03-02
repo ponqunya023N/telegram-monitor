@@ -106,22 +106,32 @@ def extract_urls(text: str):
         filtered_urls.append(url)
     return filtered_urls
 
+def fetch_with_retry(url, timeout=15, retries=3):
+    """通信エラー時にリトライを行う関数です"""
+    for i in range(retries):
+        try:
+            res = requests.get(url, headers=headers, timeout=timeout)
+            if res.status_code == 200:
+                return res
+            print(f"      [WARN] HTTP {res.status_code} for {url} (Attempt {i+1}/{retries})")
+        except Exception as e:
+            print(f"      [WARN] Connection error: {e} (Attempt {i+1}/{retries})")
+        time.sleep(2) # 少し待ってからリトライ
+    return None
+
 def resolve_external_media(url, depth=0):
     """外部ページからメディアを抽出します"""
     if depth > 1:
         return None
 
-    # 解析対象ドメインの判定（設定された外部ドメイン、または掲示板自身のドメインを対象にする）
     parsed_url = urlparse(url)
     is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain) or "upup.be" in parsed_url.netloc
     
     if is_target:
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
+        res = fetch_with_retry(url, timeout=15)
+        if res:
+            try:
                 soup = BeautifulSoup(res.text, "html.parser")
-                
-                # --- ページ内から直接メディアリンクを探す ---
                 found_media_in_page = []
                 
                 # videoタグの確認
@@ -133,7 +143,7 @@ def resolve_external_media(url, depth=0):
                         ext = full_v_url.split(".")[-1].split("?")[0]
                         found_media_in_page.append({"type": "video", "url": full_v_url, "ext": ext})
 
-                # aタグ（動画拡張子）の確認 - デバッグ情報のimgef.com等のリンクをここで拾います
+                # aタグ（動画拡張子）
                 for a in soup.find_all("a", href=True):
                     href_lower = a["href"].lower()
                     if any(ext in href_lower for ext in [".mp4", ".mov", ".wmv", ".webm"]):
@@ -143,16 +153,14 @@ def resolve_external_media(url, depth=0):
                         if media_obj not in found_media_in_page:
                             found_media_in_page.append(media_obj)
 
-                # 初心者向け解説：同一ページ内に動画があれば画像を無視し、動画のサムネイルを誤検知しないようにします
                 has_video = any(m["type"] == "video" for m in found_media_in_page)
                 
                 if not has_video:
-                    # imgタグの確認（動画がない場合のみ画像を探す）
+                    # imgタグ（動画がない場合のみ）
                     for img in soup.find_all("img", src=True):
                         src = img.get("src")
                         if src:
                             full_img_url = urljoin(url, src)
-                            # 初心者向け解説：QRコードやサイトロゴなど、通知が不要な画像はここで除外します
                             if "qrcodeout" in full_img_url or "upup-logo" in full_img_url:
                                 continue
                             
@@ -162,7 +170,7 @@ def resolve_external_media(url, depth=0):
                                 if media_obj not in found_media_in_page:
                                     found_media_in_page.append(media_obj)
                     
-                    # aタグ（画像拡張子）の確認も追加（動画がない場合のみ）
+                    # aタグ（画像拡張子）
                     for a in soup.find_all("a", href=True):
                         href_lower = a["href"].lower()
                         full_media_url = urljoin(url, a["href"])
@@ -174,26 +182,19 @@ def resolve_external_media(url, depth=0):
                             if media_obj not in found_media_in_page:
                                 found_media_in_page.append(media_obj)
 
-                # 個別ページ（depth=1）で見つかった場合は、それを返す
                 if depth == 1 and found_media_in_page:
                     return found_media_in_page
 
-                # --- 階層0（リストページ）の場合、さらに子ページを探す ---
                 if depth == 0:
-                    # 親URLの末尾（ID）を特定
                     base_id = parsed_url.path.strip('/').split('/')[-1] 
-                    
                     child_links = []
                     for a in soup.find_all("a", href=True):
                         full_child_url = urljoin(url, a["href"])
                         parsed_child = urlparse(full_child_url)
-                        
-                        # 同一ホスト内で、URLが異なり、かつ親IDが含まれるものを子ページとみなす
                         if parsed_child.netloc == parsed_url.netloc and full_child_url != url:
                             if base_id and base_id in full_child_url:
                                 child_links.append(full_child_url)
                     
-                    # 初心者向け解説：子ページ（複数リンク）がある場合、親ページにあるサムネイル画像などを省きます
                     if child_links:
                         found_media_list = [m for m in found_media_in_page if m["type"] == "video"]
                     else:
@@ -206,10 +207,11 @@ def resolve_external_media(url, depth=0):
                                 if r not in found_media_list:
                                     found_media_list.append(r)
                     
-                    if found_media_list:
-                        return found_media_list
-
-        except: pass
+                    return found_media_list
+            except Exception as e:
+                print(f"      [ERROR] BS4 analysis failed for {url}: {e}")
+        else:
+            print(f"      [ERROR] Could not fetch page content for {url}")
     return None
 
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
@@ -226,7 +228,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
                 valid_media_list.append(external)
             continue
 
-        # 以下、従来通りの特定ドメイン向けURL変換ロジック
+        # 従来通りの特定ドメイン向けURL変換ロジック
         parsed = urlparse(m_url)
         raw_file_id = parsed.path.rstrip("/").split("/")[-1]
         file_id = os.path.splitext(raw_file_id)[0] 
@@ -243,13 +245,12 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             candidates.append({"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.{ext}", "ext": ext})
 
         for attempt in candidates:
-            try:
-                if requests.get(attempt["url"], headers=headers, stream=True, timeout=5).status_code == 200:
-                    valid_media_list.append(attempt)
-                    break
-            except: continue
+            # 動画・画像の存在確認
+            check = fetch_with_retry(attempt["url"], timeout=10, retries=2)
+            if check:
+                valid_media_list.append(attempt)
+                break
 
-    # 重複排除
     unique_media = []
     seen_urls = set()
     for m in valid_media_list:
@@ -269,16 +270,23 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
 
     for media in unique_media:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
-        try:
-            file_res = requests.get(media["url"], headers=headers, timeout=20)
-            if file_res.status_code == 200:
+        # ファイル本体の取得（ここはさらに重要なのでタイムアウトを30秒に）
+        file_res = fetch_with_retry(media["url"], timeout=30, retries=3)
+        if file_res:
+            try:
                 files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_res.content)}
-                requests.post(
+                tel_res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
                     data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
-                    files=files
+                    files=files,
+                    timeout=60 # Telegramへの送信自体も余裕を持たせる
                 )
-        except: pass
+                if tel_res.status_code != 200:
+                    print(f"      [ERROR] Telegram API failed: {tel_res.text}")
+            except Exception as e:
+                print(f"      [ERROR] Exception during Telegram send: {e}")
+        else:
+            print(f"      [ERROR] Final media download failed for: {media['url']}")
 
 # ===== 処理実行ループ =====
 for index, target in enumerate(url_list, start=1):
@@ -288,7 +296,7 @@ for index, target in enumerate(url_list, start=1):
         resp = requests.get(target, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
     except Exception as e: 
-        print(f" [ERROR] Target {board_id} failed. (URL hidden)")
+        print(f" [ERROR] Target {board_id} failed: {e}")
         continue
 
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
