@@ -31,11 +31,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          # 必須ライブラリである telethon を追加
+          pip install requests beautifulsoup4 telethon
 
       - name: Run python telegram_monitor.py
         env:
+          # Pythonコードが要求するすべての環境変数をSecretsから紐付け
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          CHANNEL_IDS: ${{ secrets.CHANNEL_IDS }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO_NAME: ${{ secrets.REPO_NAME }}
+          # 既存のYAMLにあった変数も維持
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
         run: python telegram_monitor.py
