@@ -23,12 +23,14 @@ PROCESSED_IDS_FILE = "processed_ids.json"
 # --- 共通関数 ---
 
 def load_processed_ids():
+    """過去に処理したメッセージIDをファイルから読み込みます"""
     if os.path.exists(PROCESSED_IDS_FILE):
         with open(PROCESSED_IDS_FILE, "r") as f:
             return json.load(f)
     return {}
 
 def save_processed_ids(data):
+    """処理したメッセージIDをファイルに保存します"""
     with open(PROCESSED_IDS_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
@@ -73,14 +75,15 @@ def download_file_with_resume(url, destination, max_retries=5):
 
         except (requests.exceptions.RequestException, http.client.IncompleteRead) as e:
             current_size = os.path.getsize(destination) if os.path.exists(destination) else 0
-            print(f"      [WARN] Download interrupted at {current_size} bytes: {e} (Attempt {attempt}/{max_retries})")
+            print(f"      [WARN] Download interrupted at {current_size} bytes: {e} (Attempt {attempt}/{max_retries})")
             if attempt < max_retries:
                 time.sleep(5) # 再試行前に待機
             else:
-                print(f"Error: ERROR] All download attempts failed for: {url}")
+                print(f"Error: [ERROR] All download attempts failed for: {url}")
                 return False
 
 def push_to_github():
+    """変更されたファイルをGitHubに自動的に保存（コミット＆プッシュ）します"""
     try:
         subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
         subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
@@ -90,11 +93,11 @@ def push_to_github():
         if result.stdout.strip():
             subprocess.run(["git", "commit", "-m", "update files"], check=True)
             subprocess.run(["git", "push"], check=True)
-            print(" [LOG] Pushed 1 files.")
+            print(" [LOG] Pushed changes to GitHub.")
         else:
-            print(" [LOG] No changes to push.")
+            print(" [LOG] No changes to push.")
     except Exception as e:
-        print(f" [ERROR] Git operation failed: {e}")
+        print(f" [ERROR] Git operation failed: {e}")
 
 # --- メインロジック ---
 
@@ -107,6 +110,8 @@ async def main():
 
     for channel_id in CHANNEL_IDS:
         channel_id = channel_id.strip()
+        if not channel_id:
+            continue
         print(f"--- Checking: {channel_id} ---")
         
         # チャンネルのエンティティ取得
@@ -117,7 +122,7 @@ async def main():
         async for message in client.iter_messages(entity, min_id=last_id, limit=20):
             new_items_found = True
             msg_id = message.id
-            print(f"  -> [NEW] Item #{msg_id} detected.")
+            print(f"  -> [NEW] Item #{msg_id} detected.")
             
             # メディア解析 (WebPage内のメディアを優先)
             media_urls = []
@@ -125,22 +130,20 @@ async def main():
                 webpage = message.media.webpage
                 # ユーザー指示: 画像は除外、動画(.mov, .mp4)を優先
                 if webpage.display_url:
-                    # 動画URLの抽出ロジック（簡易版）
-                    # 実際にはHTML解析やAPIが必要な場合があるが、ここではログのURL形式を想定
                     # URLに '_1' を付与しない指示を遵守
                     url = webpage.display_url
                     if any(ext in url.lower() for ext in ['.mov', '.mp4']):
                         media_urls.append(url)
 
             if media_urls:
-                print(f"      [LOG] Analyzing media for #{msg_id}...")
+                print(f"      [LOG] Analyzing media for #{msg_id}...")
                 for url in media_urls:
                     filename = f"{channel_id}_{msg_id}_{os.path.basename(url).split('?')[0]}"
                     if download_file_with_resume(url, filename):
-                        print(f"      [LOG] Downloaded: {filename}")
+                        print(f"      [LOG] Downloaded: {filename}")
                         updated = True
             else:
-                print(f"      [LOG] No relevant media found in #{msg_id}.")
+                print(f"      [LOG] No relevant media found in #{msg_id}.")
 
             # 処理済みIDの更新
             if msg_id > processed_data.get(channel_id, 0):
@@ -148,7 +151,7 @@ async def main():
                 updated = True
 
         if not new_items_found:
-            print(" [LOG] No new items.")
+            print(" [LOG] No new items.")
 
     if updated:
         save_processed_ids(processed_data)
