@@ -93,6 +93,49 @@ def commit_and_push_all():
         except Exception as e:
             print(f" [ERROR] Push failed: {e}")
 
+# ===== 通信ユーティリティ =====
+
+def fetch_content_with_retry(url, timeout=30, retries=3):
+    """
+    ストリーミングを利用して大きなファイルを確実にダウンロードします。
+    IncompleteReadエラーに対抗するための強化版です。
+    """
+    for i in range(retries):
+        try:
+            # stream=True で接続を開始
+            with requests.get(url, headers=headers, timeout=timeout, stream=True) as res:
+                if res.status_code == 200:
+                    content = bytearray()
+                    # チャンクごとに読み込み、不完全な読み込みを防止
+                    for chunk in res.iter_content(chunk_size=8192):
+                        if chunk:
+                            content.extend(chunk)
+                    
+                    # Content-Lengthがわかっている場合、整合性をチェック
+                    expected_size = res.headers.get('Content-Length')
+                    if expected_size and int(expected_size) != len(content):
+                        raise requests.exceptions.ContentDecodingError(
+                            f"Incomplete download: {len(content)}/{expected_size}"
+                        )
+                    
+                    return bytes(content)
+                
+                print(f"      [WARN] HTTP {res.status_code} for {url} (Attempt {i+1}/{retries})")
+        except (requests.exceptions.RequestException, Exception) as e:
+            print(f"      [WARN] Download error on {url}: {e} (Attempt {i+1}/{retries})")
+        
+        time.sleep(3) # リトライ前に少し待機
+    return None
+
+def fetch_page_soup(url, timeout=15):
+    """ページ解析用にHTMLを取得してBeautifulSoupオブジェクトを返します"""
+    try:
+        res = requests.get(url, headers=headers, timeout=timeout)
+        if res.status_code == 200:
+            return BeautifulSoup(res.text, "html.parser")
+    except: pass
+    return None
+
 # ===== 解析・送信ロジック =====
 def extract_urls(text: str):
     """テキストからURLを抽出します"""
@@ -106,19 +149,6 @@ def extract_urls(text: str):
         filtered_urls.append(url)
     return filtered_urls
 
-def fetch_with_retry(url, timeout=15, retries=3):
-    """通信エラー時にリトライを行う関数です"""
-    for i in range(retries):
-        try:
-            res = requests.get(url, headers=headers, timeout=timeout)
-            if res.status_code == 200:
-                return res
-            print(f"      [WARN] HTTP {res.status_code} for {url} (Attempt {i+1}/{retries})")
-        except Exception as e:
-            print(f"      [WARN] Connection error: {e} (Attempt {i+1}/{retries})")
-        time.sleep(2) # 少し待ってからリトライ
-    return None
-
 def resolve_external_media(url, depth=0):
     """外部ページからメディアを抽出します"""
     if depth > 1:
@@ -128,10 +158,9 @@ def resolve_external_media(url, depth=0):
     is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain) or "upup.be" in parsed_url.netloc
     
     if is_target:
-        res = fetch_with_retry(url, timeout=15)
-        if res:
+        soup = fetch_page_soup(url)
+        if soup:
             try:
-                soup = BeautifulSoup(res.text, "html.parser")
                 found_media_in_page = []
                 
                 # videoタグの確認
@@ -180,7 +209,7 @@ def resolve_external_media(url, depth=0):
                             ext = full_media_url.split(".")[-1].split("?")[0].lower()
                             media_obj = {"type": "photo", "url": full_media_url, "ext": ext}
                             if media_obj not in found_media_in_page:
-                                found_media_in_page.append(media_obj)
+                                    found_media_in_page.append(media_obj)
 
                 if depth == 1 and found_media_in_page:
                     return found_media_in_page
@@ -210,8 +239,6 @@ def resolve_external_media(url, depth=0):
                     return found_media_list
             except Exception as e:
                 print(f"      [ERROR] BS4 analysis failed for {url}: {e}")
-        else:
-            print(f"      [ERROR] Could not fetch page content for {url}")
     return None
 
 def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, board_url, target_post_url, media_urls):
@@ -245,11 +272,13 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             candidates.append({"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.{ext}", "ext": ext})
 
         for attempt in candidates:
-            # 動画・画像の存在確認
-            check = fetch_with_retry(attempt["url"], timeout=10, retries=2)
-            if check:
-                valid_media_list.append(attempt)
-                break
+            # メディアの存在確認（HEADリクエストで軽く確認）
+            try:
+                check = requests.head(attempt["url"], headers=headers, timeout=10)
+                if check.status_code == 200:
+                    valid_media_list.append(attempt)
+                    break
+            except: continue
 
     unique_media = []
     seen_urls = set()
@@ -270,33 +299,32 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
 
     for media in unique_media:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
-        # ファイル本体の取得（ここはさらに重要なのでタイムアウトを30秒に）
-        file_res = fetch_with_retry(media["url"], timeout=30, retries=3)
-        if file_res:
+        # 強化したダウンロード関数を使用
+        file_content = fetch_content_with_retry(media["url"], timeout=45, retries=5)
+        
+        if file_content:
             try:
-                files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_res.content)}
+                files = {("video" if media["type"] == "video" else "photo"): (f"file.{media['ext']}", file_content)}
                 tel_res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
                     data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
                     files=files,
-                    timeout=60 # Telegramへの送信自体も余裕を持たせる
+                    timeout=60
                 )
                 if tel_res.status_code != 200:
                     print(f"      [ERROR] Telegram API failed: {tel_res.text}")
             except Exception as e:
                 print(f"      [ERROR] Exception during Telegram send: {e}")
         else:
-            print(f"      [ERROR] Final media download failed for: {media['url']}")
+            print(f"      [ERROR] All download attempts failed for: {media['url']}")
 
 # ===== 処理実行ループ =====
 for index, target in enumerate(url_list, start=1):
     board_id = get_board_id(target, index)
 
-    try:
-        resp = requests.get(target, headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as e: 
-        print(f" [ERROR] Target {board_id} failed: {e}")
+    soup = fetch_page_soup(target)
+    if not soup:
+        print(f" [ERROR] Target {board_id} failed to load.")
         continue
 
     board_name = soup.title.string.split("-")[0].strip() if soup.title else board_id
