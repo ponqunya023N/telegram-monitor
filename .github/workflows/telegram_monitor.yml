@@ -34,6 +34,8 @@ jobs:
           pip install requests beautifulsoup4
 
       - name: Run python telegram_monitor.py
+        # ダウンロードに時間がかかる場合に備え、個別のステップにタイムアウトを設定します
+        timeout-minutes: 15
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
