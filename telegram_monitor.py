@@ -95,36 +95,52 @@ def commit_and_push_all():
 
 # ===== 通信ユーティリティ =====
 
-def fetch_content_with_retry(url, timeout=30, retries=3):
+def fetch_content_with_retry(url, timeout=30, retries=5):
     """
     ストリーミングを利用して大きなファイルを確実にダウンロードします。
-    IncompleteReadエラーに対抗するための強化版です。
+    IncompleteReadエラーに対抗するため、Rangeヘッダーによるレジューム（続きから取得）機能を搭載しています。
     """
+    content = bytearray() # 取得済みのデータを保持するバッファ
+    
     for i in range(retries):
         try:
+            current_headers = headers.copy()
+            # もし既にデータの一部を取得済みであれば、続きから要求する
+            if len(content) > 0:
+                current_headers['Range'] = f"bytes={len(content)}-"
+                
             # stream=True で接続を開始
-            with requests.get(url, headers=headers, timeout=timeout, stream=True) as res:
-                if res.status_code == 200:
-                    content = bytearray()
-                    # チャンクごとに読み込み、不完全な読み込みを防止
+            with requests.get(url, headers=current_headers, timeout=timeout, stream=True) as res:
+                # 200 (新規取得) または 206 (続きから取得) の場合に処理を継続
+                if res.status_code in [200, 206]:
+                    # サーバーがRangeリクエストを無視して200を返してきた場合は、バッファをリセット
+                    if res.status_code == 200:
+                        content = bytearray()
+                        
+                    # チャンクごとに読み込み
                     for chunk in res.iter_content(chunk_size=8192):
                         if chunk:
                             content.extend(chunk)
                     
                     # Content-Lengthがわかっている場合、整合性をチェック
                     expected_size = res.headers.get('Content-Length')
-                    if expected_size and int(expected_size) != len(content):
+                    # Range使用時は残りサイズが返るため、現在の合計と比較
+                    if expected_size and res.status_code == 200 and int(expected_size) != len(content):
                         raise requests.exceptions.ContentDecodingError(
                             f"Incomplete download: {len(content)}/{expected_size}"
                         )
                     
+                    # 無事に全データが取得できたらループを抜ける
                     return bytes(content)
                 
                 print(f"      [WARN] HTTP {res.status_code} for {url} (Attempt {i+1}/{retries})")
+                
         except (requests.exceptions.RequestException, Exception) as e:
-            print(f"      [WARN] Download error on {url}: {e} (Attempt {i+1}/{retries})")
-        
-        time.sleep(3) # リトライ前に少し待機
+            # 指数バックオフ：リトライごとに待ち時間を長くする（2, 4, 8...秒）
+            wait_time = 2 ** (i + 1)
+            print(f"      [WARN] Download error on {url}: {e} (Attempt {i+1}/{retries}). Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+            
     return None
 
 def fetch_page_soup(url, timeout=15):
@@ -299,7 +315,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
 
     for media in unique_media:
         method = "sendVideo" if media["type"] == "video" else "sendPhoto"
-        # 強化したダウンロード関数を使用
+        # 強化したダウンロード関数を使用（レジューム・指数バックオフ機能付き）
         file_content = fetch_content_with_retry(media["url"], timeout=45, retries=5)
         
         if file_content:
@@ -316,6 +332,7 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             except Exception as e:
                 print(f"      [ERROR] Exception during Telegram send: {e}")
         else:
+            # すべてのリトライが失敗しても、プログラム全体を止めずにエラーログだけ残して次へ進む
             print(f"      [ERROR] All download attempts failed for: {media['url']}")
 
 # ===== 処理実行ループ =====
