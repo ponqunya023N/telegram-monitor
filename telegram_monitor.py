@@ -20,8 +20,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 
 # --- 秘匿設定 ---
+# EXTERNAL_DOMAINSには解析対象とするドメイン（例: upup.be,5chan.jp 等）をカンマ区切りで入れます
 DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") 
-EXTERNAL_DOMAINS = os.environ.get("EXTERNAL_DOMAINS", "").split(",") 
+EXTERNAL_DOMAINS = [d.strip() for d in os.environ.get("EXTERNAL_DOMAINS", "").split(",") if d.strip()]
 MEDIA_PREFIX = "cdn" 
 # ----------------
 
@@ -96,10 +97,7 @@ def commit_and_push_all():
 # ===== 通信ユーティリティ =====
 
 def fetch_content_with_retry(url, timeout=30, retries=5):
-    """
-    ストリーミングを利用して大きなファイルを確実にダウンロードします。
-    Rangeヘッダーによるレジューム機能を搭載。
-    """
+    """ストリーミングとRangeヘッダーを利用して確実にダウンロードします"""
     content = bytearray()
     
     for i in range(retries):
@@ -158,12 +156,15 @@ def extract_urls(text: str):
     return filtered_urls
 
 def resolve_external_media(url, depth=0):
-    """外部ページからメディアを抽出します（OGPメタデータ対応強化）"""
+    """
+    外部ページからメディアを抽出します。
+    EXTERNAL_DOMAINSに含まれるドメインのみを解析対象とします。
+    """
     if depth > 1:
         return None
 
-    parsed_url = urlparse(url)
-    is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain) or "upup.be" in parsed_url.netloc or "5chan.jp" in parsed_url.netloc
+    # URLがいずれかの許可ドメインを含んでいるかチェック
+    is_target = any(domain in url for domain in EXTERNAL_DOMAINS if domain)
     
     if is_target:
         soup = fetch_page_soup(url)
@@ -215,6 +216,7 @@ def resolve_external_media(url, depth=0):
                     return found_media_in_page
 
                 if depth == 0:
+                    parsed_url = urlparse(url)
                     base_id = parsed_url.path.strip('/').split('/')[-1] 
                     child_links = []
                     for a in soup.find_all("a", href=True):
@@ -263,7 +265,6 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             candidates.append({"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.{ext}", "ext": ext})
 
         for attempt in candidates:
-            # HEADリクエストは拒否されるため、直接GETでデータが取れるか確認
             content = fetch_content_with_retry(attempt["url"], timeout=10, retries=1)
             if content:
                 attempt["content"] = content 
