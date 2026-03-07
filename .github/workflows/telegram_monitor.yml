@@ -40,6 +40,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
-          # 追加：除外URLリストのシークレットを環境変数として渡します
-          EXCLUSION_URL: ${{ secrets.EXCLUSION_URL }}
         run: python telegram_monitor.py
