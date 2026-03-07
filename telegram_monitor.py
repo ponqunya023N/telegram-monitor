@@ -1,3 +1,4 @@
+コード2
 import os
 import sys
 import re
@@ -22,6 +23,8 @@ TARGET_URL = os.environ.get("TARGET_URL")
 # --- 秘匿設定 ---
 DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") 
 EXTERNAL_DOMAINS = os.environ.get("EXTERNAL_DOMAINS", "").split(",") 
+# 追加: 環境変数からEXCLUSION_URLを読み込み、カンマ区切りでリスト化します。空の要素は省きます。
+EXCLUSION_URLS = [u.strip() for u in os.environ.get("EXCLUSION_URL", "").split(",") if u.strip()]
 MEDIA_PREFIX = "cdn" 
 # ----------------
 
@@ -240,10 +243,21 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     valid_media_list = []
     
     for m_url in media_urls:
+        # 追加: 取得元のURL自体が除外リストの文字列を含んでいる場合はスキップします
+        if any(ex in m_url for ex in EXCLUSION_URLS):
+            continue
+
         external = resolve_external_media(m_url)
         if external:
-            if isinstance(external, list): valid_media_list.extend(external)
-            else: valid_media_list.append(external)
+            if isinstance(external, list):
+                # 追加: 外部サイトから取得した複数のメディアのうち、除外リストに含まれないものだけを追加します
+                for m in external:
+                    if not any(ex in m["url"] for ex in EXCLUSION_URLS):
+                        valid_media_list.append(m)
+            else:
+                # 追加: 外部サイトから取得した単一のメディアが、除外リストに含まれない場合のみ追加します
+                if not any(ex in external["url"] for ex in EXCLUSION_URLS):
+                    valid_media_list.append(external)
             continue
 
         parsed = urlparse(m_url)
