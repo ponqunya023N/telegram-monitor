@@ -1,4 +1,3 @@
-コード1
 name: Telegram Monitor
 
 on:
@@ -41,6 +40,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
-          # 追加: SecretsからEXCLUSION_URLを読み込み、環境変数として渡します
+          # 追加：除外URLリストのシークレットを環境変数として渡します
           EXCLUSION_URL: ${{ secrets.EXCLUSION_URL }}
         run: python telegram_monitor.py
