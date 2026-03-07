@@ -1,4 +1,3 @@
-コード2
 import os
 import sys
 import re
@@ -23,9 +22,10 @@ TARGET_URL = os.environ.get("TARGET_URL")
 # --- 秘匿設定 ---
 DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") 
 EXTERNAL_DOMAINS = os.environ.get("EXTERNAL_DOMAINS", "").split(",") 
-# 追加: 環境変数からEXCLUSION_URLを読み込み、カンマ区切りでリスト化します。空の要素は省きます。
-EXCLUSION_URLS = [u.strip() for u in os.environ.get("EXCLUSION_URL", "").split(",") if u.strip()]
 MEDIA_PREFIX = "cdn" 
+# 除外URLリストを取得し、前後の空白を除去してリスト化します
+EXCLUSION_URL = os.environ.get("EXCLUSION_URL", "").split(",")
+EXCLUSION_LIST = [u.strip() for u in EXCLUSION_URL if u.strip()]
 # ----------------
 
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
@@ -97,6 +97,11 @@ def commit_and_push_all():
             print(f" [ERROR] Push failed: {e}")
 
 # ===== 通信ユーティリティ =====
+
+def is_excluded(url):
+    """URLが除外リストに含まれているかを確認します"""
+    # 指定されたURLが、除外リスト内のいずれかの文字列を含んでいるかチェックします
+    return any(ex in url for ex in EXCLUSION_LIST)
 
 def fetch_content_with_retry(url, timeout=30, retries=5):
     """
@@ -178,14 +183,18 @@ def resolve_external_media(url, depth=0):
                 og_video = soup.find("meta", property="og:video") or soup.find("meta", attrs={"name": "twitter:player:stream"})
                 if og_video and og_video.get("content"):
                     v_url = urljoin(url, og_video["content"])
-                    ext = v_url.split(".")[-1].split("?")[0].lower()
-                    found_media_in_page.append({"type": "video", "url": v_url, "ext": ext})
+                    # 除外リストに含まれていない場合のみ追加
+                    if not is_excluded(v_url):
+                        ext = v_url.split(".")[-1].split("?")[0].lower()
+                        found_media_in_page.append({"type": "video", "url": v_url, "ext": ext})
 
                 og_image = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
                 if og_image and og_image.get("content"):
                     i_url = urljoin(url, og_image["content"])
-                    ext = i_url.split(".")[-1].split("?")[0].lower()
-                    found_media_in_page.append({"type": "photo", "url": i_url, "ext": ext})
+                    # 除外リストに含まれていない場合のみ追加
+                    if not is_excluded(i_url):
+                        ext = i_url.split(".")[-1].split("?")[0].lower()
+                        found_media_in_page.append({"type": "photo", "url": i_url, "ext": ext})
 
                 # タグ解析
                 video_tag = soup.find("video")
@@ -193,26 +202,32 @@ def resolve_external_media(url, depth=0):
                     src = video_tag.get("src") or (video_tag.find("source").get("src") if video_tag.find("source") else None)
                     if src:
                         full_v_url = urljoin(url, src)
-                        ext = full_v_url.split(".")[-1].split("?")[0].lower()
-                        m_obj = {"type": "video", "url": full_v_url, "ext": ext}
-                        if m_obj not in found_media_in_page: found_media_in_page.append(m_obj)
+                        # 除外リストに含まれていない場合のみ処理
+                        if not is_excluded(full_v_url):
+                            ext = full_v_url.split(".")[-1].split("?")[0].lower()
+                            m_obj = {"type": "video", "url": full_v_url, "ext": ext}
+                            if m_obj not in found_media_in_page: found_media_in_page.append(m_obj)
 
                 for a in soup.find_all("a", href=True):
                     href_lower = a["href"].lower()
                     if any(ext in href_lower for ext in [".mp4", ".mov", ".wmv", ".webm"]):
                         full_v_url = urljoin(url, a["href"])
-                        ext = full_v_url.split(".")[-1].split("?")[0].lower()
-                        m_obj = {"type": "video", "url": full_v_url, "ext": ext}
-                        if m_obj not in found_media_in_page: found_media_in_page.append(m_obj)
+                        # 除外リストに含まれていない場合のみ処理
+                        if not is_excluded(full_v_url):
+                            ext = full_v_url.split(".")[-1].split("?")[0].lower()
+                            m_obj = {"type": "video", "url": full_v_url, "ext": ext}
+                            if m_obj not in found_media_in_page: found_media_in_page.append(m_obj)
 
                 for img in soup.find_all("img", src=True):
                     src = img.get("src")
                     if src and not any(x in src for x in ["qrcode", "logo", "icon"]):
                         full_img_url = urljoin(url, src)
-                        ext = full_img_url.split(".")[-1].split("?")[0].lower()
-                        if ext in ["jpg", "jpeg", "png", "gif", "webp"]:
-                            m_obj = {"type": "photo", "url": full_img_url, "ext": ext}
-                            if m_obj not in found_media_in_page: found_media_in_page.append(m_obj)
+                        # 除外リストに含まれていない場合のみ処理
+                        if not is_excluded(full_img_url):
+                            ext = full_img_url.split(".")[-1].split("?")[0].lower()
+                            if ext in ["jpg", "jpeg", "png", "gif", "webp"]:
+                                m_obj = {"type": "photo", "url": full_img_url, "ext": ext}
+                                if m_obj not in found_media_in_page: found_media_in_page.append(m_obj)
 
                 if depth == 1 and found_media_in_page:
                     return found_media_in_page
@@ -243,21 +258,14 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
     valid_media_list = []
     
     for m_url in media_urls:
-        # 追加: 取得元のURL自体が除外リストの文字列を含んでいる場合はスキップします
-        if any(ex in m_url for ex in EXCLUSION_URLS):
+        # メインループのURL自体が除外リストにある場合はスキップ
+        if is_excluded(m_url):
             continue
 
         external = resolve_external_media(m_url)
         if external:
-            if isinstance(external, list):
-                # 追加: 外部サイトから取得した複数のメディアのうち、除外リストに含まれないものだけを追加します
-                for m in external:
-                    if not any(ex in m["url"] for ex in EXCLUSION_URLS):
-                        valid_media_list.append(m)
-            else:
-                # 追加: 外部サイトから取得した単一のメディアが、除外リストに含まれない場合のみ追加します
-                if not any(ex in external["url"] for ex in EXCLUSION_URLS):
-                    valid_media_list.append(external)
+            if isinstance(external, list): valid_media_list.extend(external)
+            else: valid_media_list.append(external)
             continue
 
         parsed = urlparse(m_url)
@@ -277,6 +285,10 @@ def send_telegram_combined(board_name, board_id, post_id, posted_at, body_text, 
             candidates.append({"type": "photo", "url": f"https://{netloc}/file/plane/{file_id}.{ext}", "ext": ext})
 
         for attempt in candidates:
+            # 推測したURLが除外リストにある場合はスキップ
+            if is_excluded(attempt["url"]):
+                continue
+
             # HEADリクエストは拒否されるため、直接GETでデータが取れるか確認
             content = fetch_content_with_retry(attempt["url"], timeout=10, retries=1)
             if content:
