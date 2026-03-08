@@ -1,16 +1,14 @@
-name: Telegram Monitor
+name: Media Monitor
 
 on:
   repository_dispatch:
-    types: [trigger_monitor, board_updated]
+    types: [trigger_monitor, target_updated]
   workflow_dispatch:
 
-# 今誰かが実行中であれば、次の処理はそれが終わるまで順番待ちをします
 concurrency:
-  group: telegram-monitor-group
+  group: media-monitor-group
   cancel-in-progress: false
 
-# ここで明示的にリポジトリへの書き込み権限を許可します
 permissions:
   contents: write
 
@@ -33,11 +31,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      - name: Run python telegram_monitor.py
-        # ダウンロードに時間がかかる場合に備え、個別のステップにタイムアウトを設定します
+      - name: Run python script
         timeout-minutes: 15
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
+          DOMAIN_SUFFIX: ${{ secrets.DOMAIN_SUFFIX }}
+          EXTERNAL_DOMAINS: ${{ secrets.EXTERNAL_DOMAINS }}
         run: python telegram_monitor.py
