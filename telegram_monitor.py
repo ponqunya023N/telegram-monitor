@@ -99,14 +99,17 @@ def get_soup(url, timeout=15):
 
 # ===== 解析・送信ロジック =====
 def parse_text_urls(text: str):
+    """本文から有効なURLを抽出（内部リンクは除外）"""
     found = URL_PATTERN.findall(text)
+    # 内部リンク用パターン（read.cgi 等）をフィルタリング
     return [u for u in sorted(list(set(found))) if "/read.cgi/" not in u]
 
 def resolve_media_from_page(url, depth=0):
-    if depth > 1: return None
-    if not any(domain in url for domain in EXTERNAL_DOMAINS if domain): return None
+    """外部ページからメディアを再帰的に解析"""
+    if depth > 1: return []
+    if not any(domain in url for domain in EXTERNAL_DOMAINS if domain): return []
     soup = get_soup(url)
-    if not soup: return None
+    if not soup: return []
 
     found_media = []
     try:
@@ -132,7 +135,7 @@ def resolve_media_from_page(url, depth=0):
             if not (m_type == "photo" and ext == "gif"):
                 found_media.append({"type": m_type, "url": m_url, "ext": ext})
 
-        # 汎用
+        # 汎用解析
         if not found_media:
             for a in soup.find_all("a", href=True):
                 h = a["href"].lower()
@@ -156,11 +159,16 @@ def resolve_media_from_page(url, depth=0):
     return found_media
 
 def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry_url, media_links):
+    """
+    混在する全URLを調査し、メディアが見つかれば添付、なければテキスト送信。
+    内部リンクは除外済み。
+    """
     final_media_list = []
     seen_urls = set()
     processed_file_ids = set()
 
     for link in media_links:
+        # 外部ページの解析試行
         resolved = resolve_media_from_page(link)
         if resolved:
             for r in resolved:
@@ -172,9 +180,10 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
                         seen_urls.add(r["url"])
             continue
 
-        # ダイレクト解決ロジック
+        # 特定の配布元ドメインへの直接アクセス試行
         parsed = urlparse(link)
-        f_id = os.path.splitext(parsed.path.split("/")[-1])[0]
+        raw_filename = parsed.path.split("/")[-1]
+        f_id = os.path.splitext(raw_filename)[0]
         if not f_id or f_id in processed_file_ids: continue
         
         netloc = parsed.netloc
@@ -182,46 +191,43 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
             if not netloc.startswith(MEDIA_PREFIX):
                 netloc = f"{MEDIA_PREFIX}{netloc.split('.')[0]}{DOMAIN_SUFFIX}"
 
-        # 1つのファイルIDにつき1つの有効なメディアを見つけるまで試行
-        found_for_this_id = False
-        # ビデオ/GIF候補
-        for ex in ["mp4", "mov", "webm", "gif"]:
-            test_url = f"https://{netloc}/file/{f_id}.{ex}"
-            if test_url in seen_urls: continue
-            content = download_media(test_url, timeout=10, retries=1)
-            if content:
-                final_media_list.append({"type": "video", "url": test_url, "ext": ex, "content": content})
-                seen_urls.add(test_url)
-                found_for_this_id = True
-                break
-        
-        if found_for_this_id:
-            processed_file_ids.add(f_id)
-            continue
+            found_for_this_id = False
+            # ビデオ候補（GIF含む）
+            for ex in ["mp4", "mov", "webm", "gif"]:
+                test_url = f"https://{netloc}/file/{f_id}.{ex}"
+                if test_url in seen_urls: continue
+                content = download_media(test_url, timeout=10, retries=1)
+                if content:
+                    final_media_list.append({"type": "video", "url": test_url, "ext": ex, "content": content})
+                    seen_urls.add(test_url)
+                    found_for_this_id = True
+                    break
+            
+            if not found_for_this_id:
+                # 画像候補
+                for ex in ["png", "jpg", "jpeg"]:
+                    test_url = f"https://{netloc}/file/plane/{f_id}.{ex}"
+                    if test_url in seen_urls: continue
+                    content = download_media(test_url, timeout=10, retries=1)
+                    if content:
+                        final_media_list.append({"type": "photo", "url": test_url, "ext": ex, "content": content})
+                        seen_urls.add(test_url)
+                        found_for_this_id = True
+                        break
+            
+            if found_for_this_id: processed_file_ids.add(f_id)
 
-        # 画像候補 (GIFは除外)
-        for ex in ["png", "jpg", "jpeg"]:
-            test_url = f"https://{netloc}/file/plane/{f_id}.{ex}"
-            if test_url in seen_urls: continue
-            content = download_media(test_url, timeout=10, retries=1)
-            if content:
-                final_media_list.append({"type": "photo", "url": test_url, "ext": ex, "content": content})
-                seen_urls.add(test_url)
-                found_for_this_id = True
-                break
-        
-        if found_for_this_id: processed_file_ids.add(f_id)
+    caption = f"<b>【{site_name}】</b>\n#{entry_id} | {ts}\n\n{text[:400]}"
+    kbd = {"inline_keyboard": [[{"text": "View", "url": site_url}, {"text": "Entry", "url": entry_url}]]}
 
     if not final_media_list:
-        caption = f"<b>【{site_name}】</b>\n#{entry_id} | {ts}\n\n{text[:400]}"
-        kbd = {"inline_keyboard": [[{"text": "View", "url": site_url}, {"text": "Entry", "url": entry_url}]]}
+        # メディアが見つからなかった場合、テキストのみ送信
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": caption, "parse_mode": "HTML", "reply_markup": json.dumps(kbd)})
         return
 
+    # メディアが見つかった場合、それぞれ送信
     for m in final_media_list:
-        caption = f"<b>【{site_name}】</b>\n#{entry_id} | {ts}\n\n{text[:400]}"
-        kbd = {"inline_keyboard": [[{"text": "View", "url": site_url}, {"text": "Entry", "url": entry_url}]]}
         method = "sendVideo" if m["type"] == "video" else "sendPhoto"
         files = {( "video" if m["type"] == "video" else "photo"): (f"file.{m['ext']}", m["content"])}
         try:
@@ -245,21 +251,35 @@ for i, target in enumerate(url_list, start=1):
             eno_text = item.select_one("span.eno a").get_text(strip=True)
             entry_id = int(re.search(r'\d+', eno_text).group())
         except: continue
+        
         if max_id is not None and entry_id <= max_id: continue
         if entry_id in history or entry_id in sent_entry_ids: continue
+        
         if max_id is None:
             batch_ids.append(entry_id)
             new_max = max(new_max or 0, entry_id)
             continue
+
         ts = item.select_one("time.date").get_text(strip=True) if item.select_one("time.date") else "N/A"
         txt = item.select_one("div.comment").get_text("\n", strip=True) if item.select_one("div.comment") else ""
-        media = [urljoin(target, a["href"]) for a in item.select(".filethumblist li a[href]")]
-        media.extend(parse_text_urls(txt))
-        if media:
-            process_and_notify(site_name, target_id, entry_id, ts, txt, target, f"{target}/{entry_id}", list(set(media)))
+        
+        # 1. 添付リストからの抽出
+        media_list = [urljoin(target, a["href"]) for a in item.select(".filethumblist li a[href]")]
+        
+        # 2. 本文からの有効URL抽出（内部リンクは除外済み）
+        text_media_links = parse_text_urls(txt)
+        
+        # 合計メディア候補
+        combined_candidates = list(set(media_list + text_media_links))
+        
+        if combined_candidates:
+            # 有効なメディアリンクが1つでもあれば通知処理へ
+            process_and_notify(site_name, target_id, entry_id, ts, txt, target, f"{target}/{entry_id}", combined_candidates)
             sent_entry_ids.add(entry_id)
+        
         batch_ids.append(entry_id)
         new_max = max(new_max or 0, entry_id)
 
     if batch_ids: save_processed_ids(target_id, new_max, batch_ids)
+
 sync_repository()
