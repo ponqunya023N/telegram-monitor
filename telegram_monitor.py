@@ -6,6 +6,7 @@ import json
 import io
 import subprocess
 import hashlib 
+import html
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -29,6 +30,9 @@ url_list = [u.strip() for u in TARGET_URL.split(",") if u.strip()]
 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 sent_entry_ids = set()
 URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
+
+# 監視対象サイトのドメイン一覧（内部リンクの判定に使用）
+TARGET_DOMAINS = [urlparse(u).netloc for u in url_list]
 
 updated_files = []
 
@@ -99,10 +103,20 @@ def get_soup(url, timeout=15):
 
 # ===== 解析・送信ロジック =====
 def parse_text_urls(text: str):
-    """本文から有効なURLを抽出（内部リンクは除外）"""
-    found = URL_PATTERN.findall(text)
-    # 内部リンク用パターン（read.cgi 等）をフィルタリング
-    return [u for u in sorted(list(set(found))) if "/read.cgi/" not in u]
+    """本文から有効なURLを抽出（連結防止と内部リンクの完全除外）"""
+    # 連続して書かれたURLを強制的に分離
+    spaced_text = text.replace("http://", " http://").replace("https://", " https://")
+    found = URL_PATTERN.findall(spaced_text)
+    
+    valid_urls = []
+    for u in sorted(list(set(found))):
+        p = urlparse(u)
+        # ターゲットと同一ドメイン（内部リンク）は除外
+        if p.netloc in TARGET_DOMAINS: continue
+        # 旧来の read.cgi パターンも念のため除外
+        if "/read.cgi/" in u: continue
+        valid_urls.append(u)
+    return valid_urls
 
 def resolve_media_from_page(url, depth=0):
     """外部ページからメディアを再帰的に解析"""
@@ -160,15 +174,15 @@ def resolve_media_from_page(url, depth=0):
 
 def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry_url, media_links):
     """
-    混在する全URLを調査し、メディアが見つかれば添付、なければテキスト送信。
-    内部リンクは除外済み。
+    混在するURL群を順に調査。
+    内部リンクは事前に除外されているため、メディアのみが正しく処理される。
     """
     final_media_list = []
     seen_urls = set()
     processed_file_ids = set()
 
     for link in media_links:
-        # 外部ページの解析試行
+        # 1. 外部ページの解析試行
         resolved = resolve_media_from_page(link)
         if resolved:
             for r in resolved:
@@ -180,18 +194,19 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
                         seen_urls.add(r["url"])
             continue
 
-        # 特定の配布元ドメインへの直接アクセス試行
+        # 2. 特定の配布元ドメインへの直接アクセス試行
         parsed = urlparse(link)
         raw_filename = parsed.path.split("/")[-1]
         f_id = os.path.splitext(raw_filename)[0]
         if not f_id or f_id in processed_file_ids: continue
         
         netloc = parsed.netloc
+        found_for_this_id = False
+
         if DOMAIN_SUFFIX and DOMAIN_SUFFIX in netloc:
             if not netloc.startswith(MEDIA_PREFIX):
                 netloc = f"{MEDIA_PREFIX}{netloc.split('.')[0]}{DOMAIN_SUFFIX}"
 
-            found_for_this_id = False
             # ビデオ候補（GIF含む）
             for ex in ["mp4", "mov", "webm", "gif"]:
                 test_url = f"https://{netloc}/file/{f_id}.{ex}"
@@ -217,7 +232,23 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
             
             if found_for_this_id: processed_file_ids.add(f_id)
 
-    caption = f"<b>【{site_name}】</b>\n#{entry_id} | {ts}\n\n{text[:400]}"
+        # 3. フォールバック処理（特定のドメインで解決できず、直リンク形式の場合）
+        if not found_for_this_id:
+            ext = link.split(".")[-1].split("?")[0].lower()
+            if ext in ["mp4", "mov", "webm", "gif"] and link not in seen_urls:
+                content = download_media(link, timeout=10, retries=1)
+                if content:
+                    final_media_list.append({"type": "video", "url": link, "ext": ext, "content": content})
+                    seen_urls.add(link)
+            elif ext in ["png", "jpg", "jpeg", "webp"] and link not in seen_urls:
+                content = download_media(link, timeout=10, retries=1)
+                if content:
+                    final_media_list.append({"type": "photo", "url": link, "ext": ext, "content": content})
+                    seen_urls.add(link)
+
+    # Telegram送信用のテキスト生成 (HTML解析エラーを防ぐためエスケープ処理)
+    safe_text = html.escape(text[:400])
+    caption = f"<b>【{site_name}】</b>\n#{entry_id} | {ts}\n\n{safe_text}"
     kbd = {"inline_keyboard": [[{"text": "View", "url": site_url}, {"text": "Entry", "url": entry_url}]]}
 
     if not final_media_list:
