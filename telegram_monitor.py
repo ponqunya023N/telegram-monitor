@@ -20,7 +20,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TARGET_URL = os.environ.get("TARGET_URL")
 
 # --- 秘匿設定 ---
-# EXTERNAL_DOMAINSには解析対象とするドメイン（例: upup.be,5chan.jp 等）をカンマ区切りで入れます
+# EXTERNAL_DOMAINSには解析対象とするドメインをカンマ区切りで入れます
 DOMAIN_SUFFIX = os.environ.get("DOMAIN_SUFFIX", "") 
 EXTERNAL_DOMAINS = [d.strip() for d in os.environ.get("EXTERNAL_DOMAINS", "").split(",") if d.strip()]
 MEDIA_PREFIX = "cdn" 
