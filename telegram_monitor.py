@@ -31,9 +31,6 @@ headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 sent_entry_ids = set()
 URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
 
-# 監視対象サイトのドメイン一覧（内部リンクの判定に使用）
-TARGET_DOMAINS = [urlparse(u).netloc for u in url_list]
-
 updated_files = []
 
 # ===== 状態管理 =====
@@ -103,18 +100,16 @@ def get_soup(url, timeout=15):
 
 # ===== 解析・送信ロジック =====
 def parse_text_urls(text: str):
-    """本文から有効なURLを抽出（連結防止と内部リンクの完全除外）"""
+    """本文から有効なURLを抽出（連結防止と明らかなスレッドリンクの除外）"""
     # 連続して書かれたURLを強制的に分離
     spaced_text = text.replace("http://", " http://").replace("https://", " https://")
     found = URL_PATTERN.findall(spaced_text)
     
     valid_urls = []
     for u in sorted(list(set(found))):
-        p = urlparse(u)
-        # ターゲットと同一ドメイン（内部リンク）は除外
-        if p.netloc in TARGET_DOMAINS: continue
-        # 旧来の read.cgi パターンも念のため除外
-        if "/read.cgi/" in u: continue
+        # 画像等も巻き込んでしまうターゲットドメインの一律除外を撤廃し、明らかなスレッドリンクのみ除外
+        if "/read.cgi/" in u or "test/read.cgi" in u:
+            continue
         valid_urls.append(u)
     return valid_urls
 
@@ -174,8 +169,7 @@ def resolve_media_from_page(url, depth=0):
 
 def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry_url, media_links):
     """
-    混在するURL群を順に調査。
-    内部リンクは事前に除外されているため、メディアのみが正しく処理される。
+    混在するURL群を順に調査。UPUPと直リンクが互いの処理を邪魔しないように隔離。
     """
     final_media_list = []
     seen_urls = set()
@@ -192,18 +186,21 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
                         r["content"] = content
                         final_media_list.append(r)
                         seen_urls.add(r["url"])
-            continue
+            continue # 外部ページとして処理できた場合はここで完了
 
         # 2. 特定の配布元ドメインへの直接アクセス試行
         parsed = urlparse(link)
-        raw_filename = parsed.path.split("/")[-1]
-        f_id = os.path.splitext(raw_filename)[0]
-        if not f_id or f_id in processed_file_ids: continue
-        
         netloc = parsed.netloc
-        found_for_this_id = False
-
+        
+        # DOMAIN_SUFFIX判定を先に行い、無関係なURLが巻き込まれてスキップされるのを防ぐ
         if DOMAIN_SUFFIX and DOMAIN_SUFFIX in netloc:
+            raw_filename = parsed.path.split("/")[-1]
+            f_id = os.path.splitext(raw_filename)[0]
+            
+            if f_id and f_id in processed_file_ids:
+                continue
+                
+            found_for_this_id = False
             if not netloc.startswith(MEDIA_PREFIX):
                 netloc = f"{MEDIA_PREFIX}{netloc.split('.')[0]}{DOMAIN_SUFFIX}"
 
@@ -230,21 +227,22 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
                         found_for_this_id = True
                         break
             
-            if found_for_this_id: processed_file_ids.add(f_id)
+            if found_for_this_id and f_id:
+                processed_file_ids.add(f_id)
+            continue # UPUP等のドメインに該当する場合は、フォールバック（3）には進まない
 
         # 3. フォールバック処理（特定のドメインで解決できず、直リンク形式の場合）
-        if not found_for_this_id:
-            ext = link.split(".")[-1].split("?")[0].lower()
-            if ext in ["mp4", "mov", "webm", "gif"] and link not in seen_urls:
-                content = download_media(link, timeout=10, retries=1)
-                if content:
-                    final_media_list.append({"type": "video", "url": link, "ext": ext, "content": content})
-                    seen_urls.add(link)
-            elif ext in ["png", "jpg", "jpeg", "webp"] and link not in seen_urls:
-                content = download_media(link, timeout=10, retries=1)
-                if content:
-                    final_media_list.append({"type": "photo", "url": link, "ext": ext, "content": content})
-                    seen_urls.add(link)
+        ext = link.split(".")[-1].split("?")[0].lower()
+        if ext in ["mp4", "mov", "webm", "gif"] and link not in seen_urls:
+            content = download_media(link, timeout=10, retries=1)
+            if content:
+                final_media_list.append({"type": "video", "url": link, "ext": ext, "content": content})
+                seen_urls.add(link)
+        elif ext in ["png", "jpg", "jpeg", "webp"] and link not in seen_urls:
+            content = download_media(link, timeout=10, retries=1)
+            if content:
+                final_media_list.append({"type": "photo", "url": link, "ext": ext, "content": content})
+                seen_urls.add(link)
 
     # Telegram送信用のテキスト生成 (HTML解析エラーを防ぐためエスケープ処理)
     safe_text = html.escape(text[:400])
@@ -297,14 +295,13 @@ for i, target in enumerate(url_list, start=1):
         # 1. 添付リストからの抽出
         media_list = [urljoin(target, a["href"]) for a in item.select(".filethumblist li a[href]")]
         
-        # 2. 本文からの有効URL抽出（内部リンクは除外済み）
+        # 2. 本文からの有効URL抽出
         text_media_links = parse_text_urls(txt)
         
         # 合計メディア候補
         combined_candidates = list(set(media_list + text_media_links))
         
         if combined_candidates:
-            # 有効なメディアリンクが1つでもあれば通知処理へ
             process_and_notify(site_name, target_id, entry_id, ts, txt, target, f"{target}/{entry_id}", combined_candidates)
             sent_entry_ids.add(entry_id)
         
