@@ -153,7 +153,8 @@ def resolve_media_from_page(url, depth=0):
                     found_media.append({"type": "video", "url": v_url, "ext": v_url.split(".")[-1].lower()})
             for img in soup.find_all("img", src=True):
                 s = img.get("src").lower()
-                if not any(x in s for x in ["qrcode", "logo", "icon"]) and any(ex in s for ex in [".jpg", ".jpeg", ".png", ".webp"]):
+                # サムネイル画像（moviesumb, thumb）を除外リストに追加し、動画のサムネイルを除外
+                if not any(x in s for x in ["qrcode", "logo", "icon", "moviesumb", "thumb"]) and any(ex in s for ex in [".jpg", ".jpeg", ".png", ".webp"]):
                     i_url = urljoin(url, img.get("src"))
                     found_media.append({"type": "photo", "url": i_url, "ext": i_url.split(".")[-1].lower()})
 
@@ -169,7 +170,7 @@ def resolve_media_from_page(url, depth=0):
 
 def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry_url, media_links):
     """
-    混在するURL群を順に調査。UPUPと直リンクが互いの処理を邪魔しないように隔離。
+    混在するURL群を順に調査。該当ドメインと直リンクが互いの処理を邪魔しないように隔離。
     """
     final_media_list = []
     seen_urls = set()
@@ -229,7 +230,7 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
             
             if found_for_this_id and f_id:
                 processed_file_ids.add(f_id)
-            continue # UPUP等のドメインに該当する場合は、フォールバック（3）には進まない
+            continue # 該当ドメインに該当する場合は、フォールバック（3）には進まない
 
         # 3. フォールバック処理（特定のドメインで解決できず、直リンク形式の場合）
         ext = link.split(".")[-1].split("?")[0].lower()
