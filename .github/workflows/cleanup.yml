@@ -1,0 +1,44 @@
+name: Cleanup Old Workflow Runs (Fixed Code 2)
+
+on:
+  schedule:
+    # --------------------------------------------------
+    # 日本時間 04:00 (UTC 19:00) に実行
+    # --------------------------------------------------
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+
+env:
+  # --------------------------------------------------
+  # 日本時間での指定（1時間前、3日前など）
+  # --------------------------------------------------
+  RETENTION_PERIOD: "1 hour ago"
+
+jobs:
+  delete-runs:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: Delete old workflow runs
+        run: |
+          # 1. 日本時間で基準時刻を計算し、UTC形式に変換
+          DEL_BEFORE_UTC=$(TZ="Asia/Tokyo" date -d "${{ env.RETENTION_PERIOD }}" -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          echo "Retention Setting: ${{ env.RETENTION_PERIOD }}"
+          echo "Target UTC: $DEL_BEFORE_UTC"
+
+          # 2. 条件に合う実行履歴をリストアップして一括削除
+          # --limit 1000: 一度に処理する最大件数
+          # --json databaseId: IDだけを抽出
+          # xargs で一つずつ削除コマンドを実行
+          gh run list --repo ${{ github.repository }} \
+            --created "<$DEL_BEFORE_UTC" \
+            --limit 1000 \
+            --json databaseId \
+            --jq '.[].databaseId' | \
+            xargs -I{} gh run delete {} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
