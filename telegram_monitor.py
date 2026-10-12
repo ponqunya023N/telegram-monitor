@@ -26,39 +26,37 @@ MEDIA_PREFIX = "cdn"
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TARGET_URL]):
     sys.exit(1)
 
-url_list = [u.strip() for u in TARGET_URL.split(",") if u.strip()]
+# 改行区切りおよびカンマ区切りの両方に対応
+raw_target = TARGET_URL.replace(",", "\n")
+url_list = [u.strip() for u in raw_target.splitlines() if u.strip()]
+
 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 sent_entry_ids = set()
 URL_PATTERN = re.compile(r"https?://[\w/:%#\$&\?\(\)~\.=\+\-]+", re.IGNORECASE)
 
 updated_files = []
 
-# ===== 状態管理 =====
-def get_identifier(url: str, index: int) -> str:
-    hashed = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
-    return f"{index:02d}_{hashed}"
+# ===== 状態管理 (state.json による一括管理) =====
+STATE_FILE = "state.json"
 
-def load_processed_ids(target_id: str):
-    fname = f"last_post_id_{target_id}.txt"
-    if not os.path.exists(fname): return None, []
+def get_url_hash(url: str) -> str:
+    # URLごとに不変のハッシュキーを生成（順序変更・増減に強い）
+    return hashlib.md5(url.encode("utf-8")).hexdigest()[:16]
+
+def load_global_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
     try:
-        with open(fname, "r", encoding="utf-8") as f:
-            lines = f.read().strip().splitlines()
-            if not lines: return None, []
-            max_id = int(lines[0]) if lines[0].strip().isdigit() else None
-            id_list = []
-            if len(lines) > 1:
-                id_list = [int(x) for x in lines[1].split(",") if x.strip().isdigit()]
-            return max_id, id_list
-    except: return None, []
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
 
-def save_processed_ids(target_id: str, max_id: int, entry_ids: list):
-    fname = f"last_post_id_{target_id}.txt"
-    with open(fname, "w", encoding="utf-8") as f:
-        f.write(f"{max_id}\n")
-        f.write(",".join(map(str, sorted(entry_ids))))
-    if fname not in updated_files:
-        updated_files.append(fname)
+def save_global_state(state_data):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state_data, f, ensure_ascii=False, indent=2)
+    if STATE_FILE not in updated_files:
+        updated_files.append(STATE_FILE)
 
 def sync_repository():
     if not updated_files: return
@@ -67,9 +65,15 @@ def sync_repository():
             subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
             subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
             for f in updated_files: subprocess.run(["git", "add", f], check=True)
+            
+            # 不要になった古いtxtファイルがあればGit管理から削除する
+            old_txts = [fname for fname in os.listdir(".") if fname.startswith("last_post_id_") and fname.endswith(".txt")]
+            for ot in old_txts:
+                subprocess.run(["git", "rm", "-f", ot], check=False)
+
             status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
             if status.stdout.strip():
-                subprocess.run(["git", "commit", "-m", "update state"], check=True)
+                subprocess.run(["git", "commit", "-m", "update monitor state"], check=True)
                 subprocess.run(["git", "pull", "--rebase"], check=False)
                 subprocess.run(["git", "push"], check=True)
         except: pass
@@ -101,13 +105,11 @@ def get_soup(url, timeout=15):
 # ===== 解析・送信ロジック =====
 def parse_text_urls(text: str):
     """本文から有効なURLを抽出（連結防止と明らかなスレッドリンクの除外）"""
-    # 連続して書かれたURLを強制的に分離
     spaced_text = text.replace("http://", " http://").replace("https://", " https://")
     found = URL_PATTERN.findall(spaced_text)
     
     valid_urls = []
     for u in sorted(list(set(found))):
-        # 画像等も巻き込んでしまうターゲットドメインの一律除外を撤廃し、明らかなスレッドリンクのみ除外
         if "/read.cgi/" in u or "test/read.cgi" in u:
             continue
         valid_urls.append(u)
@@ -123,7 +125,6 @@ def resolve_media_from_page(url, depth=0):
     found_media = []
     try:
         parsed_url = urlparse(url)
-        # パターンA: 構造に基づく解析
         if soup.find(class_="MainImg"):
             v_link = soup.find("a", href=re.compile(r'\.(mp4|mov|wmv|webm|gif)', re.I))
             if v_link:
@@ -135,7 +136,6 @@ def resolve_media_from_page(url, depth=0):
                 if not i_url.lower().endswith(".gif"):
                     found_media.append({"type": "photo", "url": i_url, "ext": i_url.split(".")[-1].lower()})
 
-        # パターンB: 特定の属性に基づく解析
         target_img = soup.find("img", alt=re.compile(r'(動画|画像)ファイル'))
         if target_img and target_img.parent and target_img.parent.name == "a":
             m_url = urljoin(url, target_img.parent.get("href", ""))
@@ -144,7 +144,6 @@ def resolve_media_from_page(url, depth=0):
             if not (m_type == "photo" and ext == "gif"):
                 found_media.append({"type": m_type, "url": m_url, "ext": ext})
 
-        # 汎用解析
         if not found_media:
             for a in soup.find_all("a", href=True):
                 h = a["href"].lower()
@@ -153,7 +152,6 @@ def resolve_media_from_page(url, depth=0):
                     found_media.append({"type": "video", "url": v_url, "ext": v_url.split(".")[-1].lower()})
             for img in soup.find_all("img", src=True):
                 s = img.get("src").lower()
-                # サムネイル画像（moviesumb, thumb）を除外リストに追加し、動画のサムネイルを除外
                 if not any(x in s for x in ["qrcode", "logo", "icon", "moviesumb", "thumb"]) and any(ex in s for ex in [".jpg", ".jpeg", ".png", ".webp"]):
                     i_url = urljoin(url, img.get("src"))
                     found_media.append({"type": "photo", "url": i_url, "ext": i_url.split(".")[-1].lower()})
@@ -168,16 +166,12 @@ def resolve_media_from_page(url, depth=0):
     except: pass
     return found_media
 
-def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry_url, media_links):
-    """
-    混在するURL群を順に調査。該当ドメインと直リンクが互いの処理を邪魔しないように隔離。
-    """
+def process_and_notify(site_name, entry_id, ts, text, site_url, entry_url, media_links):
     final_media_list = []
     seen_urls = set()
     processed_file_ids = set()
 
     for link in media_links:
-        # 1. 外部ページの解析試行
         resolved = resolve_media_from_page(link)
         if resolved:
             for r in resolved:
@@ -187,13 +181,11 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
                         r["content"] = content
                         final_media_list.append(r)
                         seen_urls.add(r["url"])
-            continue # 外部ページとして処理できた場合はここで完了
+            continue 
 
-        # 2. 特定の配布元ドメインへの直接アクセス試行
         parsed = urlparse(link)
         netloc = parsed.netloc
         
-        # DOMAIN_SUFFIX判定を先に行い、無関係なURLが巻き込まれてスキップされるのを防ぐ
         if DOMAIN_SUFFIX and DOMAIN_SUFFIX in netloc:
             raw_filename = parsed.path.split("/")[-1]
             f_id = os.path.splitext(raw_filename)[0]
@@ -205,7 +197,6 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
             if not netloc.startswith(MEDIA_PREFIX):
                 netloc = f"{MEDIA_PREFIX}{netloc.split('.')[0]}{DOMAIN_SUFFIX}"
 
-            # ビデオ候補（GIF含む）
             for ex in ["mp4", "mov", "webm", "gif"]:
                 test_url = f"https://{netloc}/file/{f_id}.{ex}"
                 if test_url in seen_urls: continue
@@ -217,7 +208,6 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
                     break
             
             if not found_for_this_id:
-                # 画像候補
                 for ex in ["png", "jpg", "jpeg"]:
                     test_url = f"https://{netloc}/file/plane/{f_id}.{ex}"
                     if test_url in seen_urls: continue
@@ -230,9 +220,8 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
             
             if found_for_this_id and f_id:
                 processed_file_ids.add(f_id)
-            continue # 該当ドメインに該当する場合は、フォールバック（3）には進まない
+            continue 
 
-        # 3. フォールバック処理（特定のドメインで解決できず、直リンク形式の場合）
         ext = link.split(".")[-1].split("?")[0].lower()
         if ext in ["mp4", "mov", "webm", "gif"] and link not in seen_urls:
             content = download_media(link, timeout=10, retries=1)
@@ -245,18 +234,15 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
                 final_media_list.append({"type": "photo", "url": link, "ext": ext, "content": content})
                 seen_urls.add(link)
 
-    # Telegram送信用のテキスト生成 (HTML解析エラーを防ぐためエスケープ処理)
     safe_text = html.escape(text[:400])
     caption = f"<b>【{site_name}】</b>\n#{entry_id} | {ts}\n\n{safe_text}"
     kbd = {"inline_keyboard": [[{"text": "View", "url": site_url}, {"text": "Entry", "url": entry_url}]]}
 
     if not final_media_list:
-        # メディアが見つからなかった場合、テキストのみ送信
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": caption, "parse_mode": "HTML", "reply_markup": json.dumps(kbd)})
         return
 
-    # メディアが見つかった場合、それぞれ送信
     for m in final_media_list:
         method = "sendVideo" if m["type"] == "video" else "sendPhoto"
         files = {( "video" if m["type"] == "video" else "photo"): (f"file.{m['ext']}", m["content"])}
@@ -267,13 +253,29 @@ def process_and_notify(site_name, target_id, entry_id, ts, text, site_url, entry
         except: pass
 
 # ===== 実行ループ =====
-for i, target in enumerate(url_list, start=1):
-    target_id = get_identifier(target, i)
+global_state = load_global_state()
+new_global_state = {}
+active_hashes = set()
+
+for target in url_list:
+    url_hash = get_url_hash(target)
+    active_hashes.add(url_hash)
+    
+    # 既存の状態を取得（なければ初期値）
+    board_data = global_state.get(url_hash, {"max_id": None, "history": []})
+    max_id = board_data.get("max_id")
+    history = board_data.get("history", [])
+    history_set = set(history)
+
     soup = get_soup(target)
-    if not soup: continue
-    site_name = soup.title.string.split("-")[0].strip() if soup.title else target_id
+    if not soup:
+        # 接続失敗時も既存状態を保持するためそのまま引き継ぐ
+        new_global_state[url_hash] = board_data
+        continue
+
+    site_name = soup.title.string.split("-")[0].strip() if soup.title else url_hash
     items = soup.select("article.resentry")
-    max_id, history = load_processed_ids(target_id)
+    
     new_max, batch_ids = max_id, []
 
     for item in reversed(items):
@@ -283,7 +285,7 @@ for i, target in enumerate(url_list, start=1):
         except: continue
         
         if max_id is not None and entry_id <= max_id: continue
-        if entry_id in history or entry_id in sent_entry_ids: continue
+        if entry_id in history_set or entry_id in sent_entry_ids: continue
         
         if max_id is None:
             batch_ids.append(entry_id)
@@ -293,22 +295,29 @@ for i, target in enumerate(url_list, start=1):
         ts = item.select_one("time.date").get_text(strip=True) if item.select_one("time.date") else "N/A"
         txt = item.select_one("div.comment").get_text("\n", strip=True) if item.select_one("div.comment") else ""
         
-        # 1. 添付リストからの抽出
         media_list = [urljoin(target, a["href"]) for a in item.select(".filethumblist li a[href]")]
-        
-        # 2. 本文からの有効URL抽出
         text_media_links = parse_text_urls(txt)
-        
-        # 合計メディア候補
         combined_candidates = list(set(media_list + text_media_links))
         
         if combined_candidates:
-            process_and_notify(site_name, target_id, entry_id, ts, txt, target, f"{target}/{entry_id}", combined_candidates)
+            process_and_notify(site_name, entry_id, ts, txt, target, f"{target}/{entry_id}", combined_candidates)
             sent_entry_ids.add(entry_id)
         
         batch_ids.append(entry_id)
         new_max = max(new_max or 0, entry_id)
 
-    if batch_ids: save_processed_ids(target_id, new_max, batch_ids)
+    # この掲示板の更新された状態を保存対象にセット
+    if batch_ids:
+        updated_history = sorted(list(history_set.union(batch_ids)))
+        new_global_state[url_hash] = {
+            "max_id": new_max,
+            "history": updated_history
+        }
+    else:
+        new_global_state[url_hash] = board_data
+
+# URLリストから削除された掲示板のデータは自動的に除外される（ゴミ掃除）
+if new_global_state != global_state:
+    save_global_state(new_global_state)
 
 sync_repository()
